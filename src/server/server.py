@@ -72,10 +72,10 @@ class Server:
     def run_forever(self) -> None:
         """Run the hourly loop. Only returns on shutdown (``KeyboardInterrupt``)."""
         if self.config.run_on_start:
-            logger.info("run-on-start enabled: doing an initial pass")
+            logger.warning("run-on-start enabled: doing an initial pass")
             self.run_pass()
         else:
-            logger.info("run-on-start disabled: waiting for the next hour boundary")
+            logger.warning("run-on-start disabled: waiting for the next hour boundary")
 
         while True:
             now = datetime.now(UCAS_TIMEZONE)

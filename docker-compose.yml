@@ -1,6 +1,11 @@
 services:
   ucas-course-sign-in:
-    build: .
+    build:
+      context: .
+      args:
+        # Debian apt mirror used during the build. Override on networks where
+        # deb.debian.org is slow, e.g. `APT_MIRROR=mirrors.aliyun.com` in .env.
+        APT_MIRROR: ${APT_MIRROR:-deb.debian.org}
     image: ucas-course-sign-in:latest
     container_name: ucas-course-sign-in
     restart: unless-stopped
@@ -8,6 +13,13 @@ services:
     # missing, Compose refuses to start instead of running without credentials.
     env_file:
       - .env
+    # Resolve names through these servers directly instead of the host's
+    # resolver. On some mainland networks the DHCP-provided DNS is unreachable,
+    # which would leave the container unable to reach UCAS. Override with
+    # UCAS_DNS_PRIMARY / UCAS_DNS_SECONDARY in .env if needed.
+    dns:
+      - ${UCAS_DNS_PRIMARY:-223.5.5.5}
+      - ${UCAS_DNS_SECONDARY:-223.6.6.6}
     # No state to persist: every run re-fetches today's courses from UCAS, which
     # reports which ones are already signed in. The timezone is baked into the
     # image (Asia/Shanghai), see the Dockerfile.

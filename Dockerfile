@@ -6,15 +6,27 @@
 # This keeps the final image free of compilers, caches and pip.
 ARG PYTHON_VERSION=3.12
 
+# APT mirror baked into the Debian base images. The default is the official
+# mirror; set it to a local one (e.g. mirrors.aliyun.com) where deb.debian.org
+# is slow or blocked. `docker compose` passes it through as a build arg.
+ARG APT_MIRROR=deb.debian.org
+
 # --------------------------------------------------------------------------- #
 # Build stage
 # --------------------------------------------------------------------------- #
 FROM python:${PYTHON_VERSION}-slim AS builder
 
 ARG PYTHON_VERSION
+ARG APT_MIRROR
 
 # `uv` is the only extra tool the build needs.
-RUN apt-get update \
+RUN set -eux; \
+    if [ "${APT_MIRROR}" != "deb.debian.org" ]; then \
+        for f in /etc/apt/sources.list /etc/apt/sources.list.d/debian.sources; do \
+            if [ -f "$f" ]; then sed -i "s|deb.debian.org|${APT_MIRROR}|g" "$f"; fi; \
+        done; \
+    fi; \
+    apt-get update \
  && apt-get install -y --no-install-recommends curl ca-certificates \
  && rm -rf /var/lib/apt/lists/* \
  && curl -LsSf https://astral.sh/uv/install.sh | sh
@@ -37,12 +49,19 @@ RUN uv venv --python=python${PYTHON_VERSION} /app/.venv \
 FROM python:${PYTHON_VERSION}-slim AS runtime
 
 ARG PYTHON_VERSION
+ARG APT_MIRROR
 
 # tzdata provides the zoneinfo database. UCAS is a Beijing-time service: the
 # course date and the sign-in window are always China Standard Time, so the
 # timezone is baked into the image (both /etc/localtime and TZ) instead of being
 # configurable. Asia/Shanghai has no DST, so this is a fixed UTC+8 clock.
-RUN apt-get update \
+RUN set -eux; \
+    if [ "${APT_MIRROR}" != "deb.debian.org" ]; then \
+        for f in /etc/apt/sources.list /etc/apt/sources.list.d/debian.sources; do \
+            if [ -f "$f" ]; then sed -i "s|deb.debian.org|${APT_MIRROR}|g" "$f"; fi; \
+        done; \
+    fi; \
+    apt-get update \
  && apt-get install -y --no-install-recommends tzdata \
  && ln -snf /usr/share/zoneinfo/Asia/Shanghai /etc/localtime \
  && echo "Asia/Shanghai" > /etc/timezone \

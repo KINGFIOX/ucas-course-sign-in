@@ -28,9 +28,6 @@ from .notify import Message, Notifier
 LOG_FORMAT = "%(asctime)s %(levelname)-8s %(name)s: %(message)s"
 DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
 
-#: Only loggers below this namespace are pushed; it keeps library noise out.
-_PACKAGE = __name__.split(".")[0]
-
 #: Records at this level or above become notifications.
 NOTIFY_LEVEL = logging.WARNING
 
@@ -45,13 +42,6 @@ class _UcasFormatter(logging.Formatter):
     def formatTime(self, record: logging.LogRecord, datefmt: str | None = None) -> str:
         moment = datetime.fromtimestamp(record.created, tz=UCAS_TIMEZONE)
         return moment.strftime(datefmt or DATE_FORMAT)
-
-
-class _PackageFilter(logging.Filter):
-    """Only let records from this package's own loggers through."""
-
-    def filter(self, record: logging.LogRecord) -> bool:
-        return record.name.split(".")[0] == _PACKAGE
 
 
 class NotifyHandler(logging.Handler):
@@ -72,7 +62,6 @@ class NotifyHandler(logging.Handler):
         super().__init__(level)
         self.notifier = notifier
         self.prefix = prefix
-        self.addFilter(_PackageFilter())
 
     def emit(self, record: logging.LogRecord) -> None:
         try:
