@@ -16,14 +16,15 @@ every run and a course that is already marked as signed upstream is never
 signed again or pushed twice. Failures are retried on the next run, and inside
 the sign-in window there are usually one or two hourly runs left to recover.
 
-This module is an internal building block: the ``daemon`` console script calls
-:func:`run_once` every hour (see :mod:`daemon.daemon`). A standalone one-shot
-command is intentionally not exposed; the Docker image runs the daemon.
+This module is an internal building block: the ``server`` console script calls
+:func:`run_once` every hour (see :mod:`server.server`). A standalone one-shot
+command is intentionally not exposed; the Docker image runs the server.
 """
 
 from __future__ import annotations
 
 import os
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Mapping
 
@@ -36,7 +37,10 @@ from common.api import (
     sign_window_state,
 )
 
+from .logging_setup import get_logger
 from .notify import Message, Notifier, NotifyConfigError
+
+logger = get_logger(__name__)
 
 
 class AutosignConfigError(Exception):
@@ -130,18 +134,15 @@ def run_once(
     client: UcasClient,
     config: AutosignConfig,
     notifier: Notifier | None = None,
-    log: object = print,
+    log: Callable[[str], None] | None = None,
 ) -> AutosignResult:
     """Fetch today's courses and sign in for everything actionable.
 
     Never raises for expected upstream problems -- those become an
-    :class:`AutosignResult` and (where required) a push.
+    :class:`AutosignResult` and (where required) a push. ``log`` overrides the
+    default logger (used by tests).
     """
-    def emit(text: str) -> None:
-        try:
-            log(text)  # type: ignore[operator]
-        except TypeError:  # pragma: no cover - defensive
-            print(text)
+    emit = log if log is not None else logger.info
 
     # 1. Which day are we signing for? The calibrated UCAS server clock decides.
     try:
@@ -157,7 +158,7 @@ def run_once(
         return _fail_fetch(notifier, date, exc, emit)
 
     if not courses:
-        emit(f"[autosign] {date}: no courses -- staying silent")
+        emit(f"{date}: no courses -- staying silent")
         return AutosignResult(date=date, status="no-courses")
 
     # 3. Pick the courses that still need a sign-in. UCAS itself is the source
@@ -170,12 +171,12 @@ def run_once(
             continue
         window = sign_window_state(course, date, now_ms)
         if window != "open":
-            emit(f"[autosign] {date}: skip {course.course_name or course.id} (window: {window})")
+            emit(f"{date}: skip {course.course_name or course.id} (window: {window})")
             continue
         pending.append(course)
 
     if not pending:
-        emit(f"[autosign] {date}: {len(courses)} course(s), nothing to sign in -- staying silent")
+        emit(f"{date}: {len(courses)} course(s), nothing to sign in -- staying silent")
         return AutosignResult(date=date, status="idle")
 
     # 4. Sign in.
@@ -184,10 +185,10 @@ def run_once(
         outcome = _sign_one(client, config, course)
         if outcome.ok:
             result.signed.append(outcome)
-            emit(f"[autosign] {date}: signed in for {course.course_name or course.id}")
+            emit(f"{date}: signed in for {course.course_name or course.id}")
         else:
             result.failed.append(outcome)
-            emit(f"[autosign] {date}: sign-in failed for {course.course_name or course.id}: {outcome.reason}")
+            emit(f"{date}: sign-in failed for {course.course_name or course.id}: {outcome.reason}")
 
     if result.failed:
         result.status = "failed"
@@ -209,9 +210,14 @@ def _sign_one(client: UcasClient, config: AutosignConfig, course: Course) -> Sig
     return SignDetail(course=course, result=sign_result)
 
 
-def _fail_fetch(notifier: Notifier | None, date: str, exc: UcasError, emit: object) -> AutosignResult:
+def _fail_fetch(
+    notifier: Notifier | None,
+    date: str,
+    exc: UcasError,
+    emit: Callable[[str], None],
+) -> AutosignResult:
     label = date or "today"
-    emit(f"[autosign] {label}: could not fetch courses: {exc.message}")  # type: ignore[operator]
+    emit(f"{label}: could not fetch courses: {exc.message}")
     _push(
         notifier,
         Message(
@@ -223,7 +229,7 @@ def _fail_fetch(notifier: Notifier | None, date: str, exc: UcasError, emit: obje
     return AutosignResult(date=date, status="error", error=exc.message)
 
 
-def _push(notifier: Notifier | None, message: Message, emit: object) -> None:
+def _push(notifier: Notifier | None, message: Message, emit: Callable[[str], None]) -> None:
     if notifier is None:
         return
     try:
@@ -231,7 +237,7 @@ def _push(notifier: Notifier | None, message: Message, emit: object) -> None:
     except NotifyConfigError:
         raise
     except Exception as exc:  # noqa: BLE001 - a push must never break the run
-        emit(f"[autosign] notification failed: {exc}")  # type: ignore[operator]
+        emit(f"notification failed: {exc}")
 
 
 # --------------------------------------------------------------------------- #

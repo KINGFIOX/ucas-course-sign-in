@@ -1,8 +1,8 @@
-"""``python -m daemon`` entry point: run the hourly scheduler."""
+"""``python -m server`` entry point: run the hourly scheduler."""
 
 from __future__ import annotations
 
-from .daemon import main
+from .server import main
 
 if __name__ == "__main__":
     raise SystemExit(main())

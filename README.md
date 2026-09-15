@@ -30,7 +30,7 @@ render a QR code that you scan with the UCAS mobile app.
 - **Server clock calibration**: syncs with the UCAS timestamp server and
   compensates for the ~3s drift between its two servers.
 - Refreshes the course status automatically after a successful sign-in.
-- **Automatic sign-in**: an hourly scheduler (`daemon`) that signs in for you
+- **Automatic sign-in**: an hourly scheduler (`server`) that signs in for you
   and pushes the result to your phone. It is meant to run in the shipped
   `Dockerfile` / `docker-compose.yml` stack (see
   [Automatic sign-in](#automatic-sign-in-docker)).
@@ -125,19 +125,24 @@ and confirm there.
 ## Automatic sign-in (Docker)
 
 Besides the interactive TUI, the project ships a non-interactive hourly
-scheduler (`daemon`) that is meant to run in the deployed Docker stack. It signs
+scheduler (`server`) that is meant to run in the deployed Docker stack. It signs
 in for you **at the top of every hour** and only notifies you when there is
 something to say.
 
 What each run does:
 
-| Situation | Action |
-| --- | --- |
-| No courses today | silent |
-| A course is already signed in (upstream) | skipped, silent |
-| Courses today, but none is in its sign-in window | silent |
-| A course is in its sign-in window and not yet signed | sign in, then **push** the result (success *and* failure) |
-| The course list cannot be fetched | **push** the error |
+| Situation | Action | Log level |
+| --- | --- | --- |
+| No courses today | silent | INFO |
+| A course is already signed in (upstream) | silent | INFO |
+| Courses today, but none is in its sign-in window | silent | INFO |
+| A course is in its sign-in window and not yet signed, sign in success | push | WARN |
+| A course is in its sign-in window and not yet signed, sign in success | push | ERROR |
+| The course list cannot be fetched | push | WARN |
+| configuration error | -- | FATAL |
+| notification configuration failed | -- | FATAL |
+| ucas fetch date error | push | FATAL |
+| 
 
 "In its sign-in window" means from 30 minutes before the class starts until the
 class ends -- the same window the upstream enforces. Because the window lasts
@@ -195,13 +200,17 @@ docker compose restart
 docker compose down
 
 # show the scheduler's help / environment reference without starting it
-# (the image entrypoint is `python -m daemon`)
+# (the image entrypoint is `python -m server`)
 docker compose run --rm ucas-course-sign-in -h
 ```
 
 There is no separate one-shot command: the container always runs the hourly
 scheduler, and with `UCAS_RUN_ON_START=1` (the default) it also performs one
 pass immediately on start.
+
+The server logs through the Python standard `logging` module to stderr, one line
+per event, timestamped in `Asia/Shanghai`: `docker compose logs -f` is all you
+need to follow it.
 
 ### Notifications (Feishu)
 
@@ -231,18 +240,19 @@ the remaining variables are:
 | --- | --- | --- |
 | `UCAS_USERNAME` | -- | UCAS mail (required) |
 | `UCAS_PASSWORD` | -- | Password (from `.env`) |
-| `UCAS_RUN_ON_START` | `1` | Run a pass immediately on daemon start |
+| `UCAS_RUN_ON_START` | `1` | Run a pass immediately on server start |
 
 A non-zero schedule `STATUS` from the upstream is ambiguous: it is returned both
 when the query really failed and when there are simply no courses that day. The
-daemon always treats it as an error and pushes it, so a genuine upstream problem
+server always treats it as an error and pushes it, so a genuine upstream problem
 is never silently swallowed.
 
 ### How the schedule works
 
-The daemon wakes on every hour boundary (`xx:00:00`) and runs a sign-in pass.
-No cron or extra scheduler dependency is involved, and `SIGTERM`/`SIGINT` (as
-sent by `docker stop`) interrupt the sleep so shutdown is immediate.
+The server wakes on every hour boundary (`xx:00:00`) and runs a sign-in pass.
+No cron or extra scheduler dependency is involved. Shutdown is a regular
+server-style `KeyboardInterrupt`: `SIGTERM`/`SIGINT` (as sent by `docker stop`)
+are routed to it, so both interrupt the sleep and exit gracefully.
 
 ## How it works
 
@@ -272,7 +282,7 @@ Details preserved from the original port:
 ```text
 .
 ├─ pyproject.toml
-├─ Dockerfile                 # deployable image (hourly daemon by default)
+├─ Dockerfile                 # deployable image (hourly server by default)
 ├─ docker-compose.yml         # server deployment
 ├─ .env.example               # copy to .env and fill in
 ├─ src/
@@ -282,10 +292,11 @@ Details preserved from the original port:
 │  ├─ tui/                    # interactive front end
 │  │  ├─ __main__.py          #   python -m tui
 │  │  └─ tui.py               #   prompt flow and QR code
-│  └─ daemon/                 # automatic front end
-│     ├─ __main__.py          #   python -m daemon
+│  └─ server/                 # automatic front end
+│     ├─ __main__.py          #   python -m server
 │     ├─ autosign.py          #   one-pass sign-in + notification
-│     ├─ daemon.py            #   hourly scheduler
+│     ├─ server.py            #   hourly scheduler
+│     ├─ logging_setup.py     #   stdlib logging (stderr, UCAS timezone)
 │     └─ notify.py            #   Feishu notifications
 ```
 
