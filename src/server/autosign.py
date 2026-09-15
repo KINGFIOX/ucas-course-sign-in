@@ -45,7 +45,6 @@ from common.error import (
     UcasJsonError,
     UcasNetworkError,
     UcasServerError,
-    UcasUnrecognizableCourse,
 )
 
 from .logging import get_logger
@@ -148,17 +147,13 @@ def run_once(client: UcasClient, config: AutosignConfig) -> AutosignResult:
     :class:`AutosignResult`.
     """
     # 1. Which day are we signing for? The calibrated UCAS server clock decides.
-    try:
-        date = format_date_from_ms(client.server_now_ms())
-    except UcasError as exc:
-        return _fail_fetch("", exc, logging.FATAL)
+    # UcasNetworkError, UcasJsonError, NotImplementedError
+    date = format_date_from_ms(client.server_now_ms())
 
     # 2. Load the schedule. The endpoint now tells "no courses today" (STATUS 2,
     #    returned as an empty list) apart from a real error (raised).
-    try:
-        courses = client.query_courses(config.username, config.password, date)
-    except UcasError as exc:
-        return _fail_fetch(date, exc, logging.WARNING)
+    # UcasNetworkError UcasServerError NotImplementedError
+    courses = client.query_courses(config.username, config.password, date)
 
     if not courses:
         logger.info("%s: no courses -- staying silent", date)
@@ -214,20 +209,8 @@ def run_once(client: UcasClient, config: AutosignConfig) -> AutosignResult:
 
 def _sign_one(client: UcasClient, config: AutosignConfig, course: Course) -> SignDetail:
     """Sign in for one course, turning every failure into a precise reason."""
-    try:
-        sign_result = client.sign(config.username, config.password, course.id)
-    except UcasAuthError as exc:
-        return SignDetail(course=course, error=f"credentials rejected: {exc.message}")
-    except UcasUnrecognizableCourse as exc:
-        return SignDetail(course=course, error=f"unrecognized course identifier: {exc.message}")
-    except UcasNetworkError as exc:
-        return SignDetail(course=course, error=f"network error: {exc.message}")
-    except UcasServerError as exc:
-        return SignDetail(course=course, error=f"UCAS server error: {exc.message}")
-    except UcasJsonError as exc:
-        return SignDetail(course=course, error=f"unexpected UCAS reply: {exc.message}")
-    except UcasError as exc:
-        return SignDetail(course=course, error=exc.message)
+    # UcasUnrecognizableCourse UcasNetworkError UcasJsonError NotImplementedError
+    sign_result = client.sign(config.username, config.password, course.id)
     return SignDetail(course=course, result=sign_result)
 
 

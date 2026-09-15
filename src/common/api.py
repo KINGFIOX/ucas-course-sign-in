@@ -285,6 +285,10 @@ class UcasClient:
     # -- Internal helpers ------------------------------------------------- #
 
     def _post(self, url: str, **kwargs: Any) -> httpx.Response:
+        """
+        Raises:
+            UcasNetworkError
+        """
         try:
             return self._client.post(url, **kwargs)
         except httpx.TimeoutException as exc:
@@ -295,6 +299,10 @@ class UcasClient:
             raise UcasNetworkError(f"Network error: {exc}", "NETWORK_ERROR") from exc
 
     def _get(self, url: str, **kwargs: Any) -> httpx.Response:
+        """
+        Raises:
+            UcasNetworkError
+        """
         try:
             return self._client.get(url, **kwargs)
         except httpx.TimeoutException as exc:
@@ -349,14 +357,20 @@ class UcasClient:
     # -- Schedule --------------------------------------------------------- #
 
     def query_courses(self, username: str, password: str, date: str) -> list[Course]:
-        """Log in and fetch the course list for the given date."""
+        """Log in and fetch the course list for the given date.
+
+        Raises:
+            UcasNetworkError
+            UcasServerError
+            NotImplementedError
+        """
         normalized_date = normalize_date(date)
         login = self.login(username, password)
 
         url = f"{SCHEDULE_URL}?" + urllib.parse.urlencode(
             {"id": login.user_id, "dateStr": normalized_date}
         )
-        response = self._get(
+        response = self._get( # UcasNetworkError
             url,
             headers={"sessionId": login.session_id, "User-Agent": API_UA},
         )
@@ -402,6 +416,12 @@ class UcasClient:
         When ``timestamp`` is omitted, a clock-calibrated server timestamp is
         used. Returns a :class:`SignResult` on success; any failure is raised
         as a :class:`UcasError` subclass.
+
+        Raises:
+            UcasUnrecognizableCourse
+            UcasNetworkError
+            UcasJsonError
+            NotImplementedError
         """
         course_id = normalize_course_sched_id(identifier)
         timetable_id = normalize_uuid(identifier)
@@ -412,7 +432,7 @@ class UcasClient:
                 "request",
             )
 
-        login = self.login(username, password)
+        login = self.login(username, password) # UcasNetworkError
 
         timestamp = self.sign_timestamp()
 
@@ -421,7 +441,7 @@ class UcasClient:
         else:
             url = build_timetable_sign_url(timetable_id or "", timestamp, login.user_id)
 
-        response = self._get(
+        response = self._get( # UcasNetworkError
             url,
             headers={"sessionId": login.session_id, "User-Agent": API_UA},
         )
@@ -432,29 +452,38 @@ class UcasClient:
                 "sign",
             )
 
-        data = self._json(response, "UPSTREAM_SIGN_BAD_JSON", "sign")
-        return parse_sign_response(data)
+        data = self._json(response, "UPSTREAM_SIGN_BAD_JSON", "sign") # UcasJsonError
+        return parse_sign_response(data) # NotImplementedError
 
     # -- Clock calibration ------------------------------------------------ #
 
     def server_now_ms(self) -> int:
-        """Current server time in milliseconds; asks the timestamp endpoint.
+        """Current server time in milliseconds, from the timestamp endpoint.
 
-        Falls back to the local clock when the endpoint cannot be reached.
+        The reply's timestamp is taken mid-round-trip, so half of the measured
+        latency is added back to estimate the server clock at receipt.
+
+        Raises:
+            UcasNetworkError: the timestamp endpoint could not be reached.
+            UcasJsonError: the reply body was not the expected JSON object.
+            NotImplementedError: the reply was missing a usable ``timestamp`` or
+                carried a non-``0`` ``STATUS`` -- a deliberate placeholder for
+                now, not a finished error path.
         """
         start_ms = time.time() * 1000
-        response = self._post(
+        response = self._post(  # -> UcasNetworkError
             f"{TIMESTAMP_URL}?id={random.randint(0, 999_999)}",
             headers={"User-Agent": API_UA, "Connection": "Keep-Alive"},
             timeout=TIMESTAMP_TIMEOUT,
         )
-        data = self._json(response, "UPSTREAM_TIMESTAMP_BAD_JSON", "timestamp")
+        data = self._json(response, "UPSTREAM_TIMESTAMP_BAD_JSON", "timestamp")  # -> UcasJsonError
         timestamp = data.get("timestamp")
         if data.get("STATUS") == "0" and isinstance(timestamp, (int, float)):
             latency_ms = max(0.0, time.time() * 1000 - start_ms)
             # The timestamp is taken mid-round-trip, so add half of it back.
             return int(float(timestamp) + latency_ms / 2)
 
+        # Bad STATUS or no numeric timestamp: not handled yet.
         raise NotImplementedError
 
     def sign_timestamp(self) -> int:

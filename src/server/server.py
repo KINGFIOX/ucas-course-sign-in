@@ -25,7 +25,6 @@ import time
 from datetime import datetime, timedelta
 
 from common.api import UCAS_TIMEZONE, UcasClient
-from common.error import UcasError
 
 from .autosign import AutosignConfig, AutosignConfigError, run_once
 from .logging import attach_notify_handler, configure_logging, get_logger
@@ -94,23 +93,7 @@ class Server:
         unattended process. The record is logged at ``ERROR``, so the traceback
         goes to stderr and the notify handler pushes the short message.
         """
-        try:
-            run_once(self.client, self.config)
-        except UcasError as exc:
-            # run_once already catches the expected ones, so this is a bug.
-            logger.exception(
-                "unhandled UCAS error: %s (code %s, stage %s)",
-                exc.message,
-                exc.code,
-                exc.stage,
-                extra={"title": "UCAS auto sign-in: runtime error"},
-            )
-        except Exception as exc:  # noqa: BLE001 - a server must not die here
-            logger.exception(
-                "unexpected failure: %s",
-                exc,
-                extra={"title": "UCAS auto sign-in: runtime error"},
-            )
+        run_once(self.client, self.config)
 
     def shutdown(self) -> None:
         """Release the HTTP client and the notifier."""
