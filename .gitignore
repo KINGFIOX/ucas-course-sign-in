@@ -1,0 +1,36 @@
+# This file is also the Docker build context (`/.dockerignore` is a symlink
+# to it), so keep it free of anything that should not enter the image.
+.git/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+
+# Tooling
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Local artifacts
+*.png
+!doc/**/*.png
+.DS_Store
+
+# Automatic sign-in
+.env
+data/
+ucas-course-sign-in-state.json
+ucas-course-sign-in-state.json.tmp
+secrets/
+
+# uv / editors
+.idea/
+.vscode/

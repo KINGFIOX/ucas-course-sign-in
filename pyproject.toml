@@ -1,0 +1,36 @@
+[project]
+name = "ucas-course-sign-in"
+version = "0.1.0"
+description = "Command-line tool for UCAS course search and direct sign-in"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "AGPL-3.0-or-later" }
+dependencies = [
+    "httpx>=0.27",
+    "qrcode>=7.4",
+]
+
+[project.scripts]
+tui = "tui.tui:main"
+daemon = "daemon.daemon:main"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.11.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/common", "src/tui", "src/daemon"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I"]
+ignore = ["E501"]

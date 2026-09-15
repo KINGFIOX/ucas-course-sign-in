@@ -1,0 +1,13 @@
+services:
+  ucas-course-sign-in:
+    build: .
+    image: ucas-course-sign-in:latest
+    container_name: ucas-course-sign-in
+    restart: unless-stopped
+    # Required: `cp .env.example .env` and fill it in first. If .env is
+    # missing, Compose refuses to start instead of running without credentials.
+    env_file:
+      - .env
+    # No state to persist: every run re-fetches today's courses from UCAS, which
+    # reports which ones are already signed in. The timezone is baked into the
+    # image (Asia/Shanghai), see the Dockerfile.
