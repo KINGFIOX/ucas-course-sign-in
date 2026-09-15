@@ -30,7 +30,7 @@ from common.api import (
     Course,
     SignResult,
     UcasClient,
-    build_sign_url,
+    build_scan_url,
     format_date_from_ms,
     format_time_range,
     normalize_course_sched_id,
@@ -43,7 +43,7 @@ from common.error import (
     UcasJsonError,
     UcasNetworkError,
     UcasServerError,
-    UcasSignError,
+    UcasUnrecognizableCourse,
 )
 
 try:  # POSIX single-key input, used by the live QR refresh
@@ -54,6 +54,8 @@ try:  # POSIX single-key input, used by the live QR refresh
     _HAS_TERMIOS = True
 except ImportError:  # pragma: no cover - Windows
     _HAS_TERMIOS = False
+
+print(f"_HAS_TERMIOS: {_HAS_TERMIOS}")
 
 WINDOW_TEXT = {
     "open": "Open",
@@ -148,9 +150,8 @@ def _error_hint(exc: UcasError) -> str:
         return f"UCAS server error: {exc.message}"
     if isinstance(exc, UcasJsonError):
         return f"Unexpected reply from UCAS: {exc.message}"
-    if isinstance(exc, UcasSignError):
-        detail = f" (upstream status {exc.upstream_status})" if exc.upstream_status else ""
-        return f"{exc.message}{detail}"
+    if isinstance(exc, UcasUnrecognizableCourse):
+        return f"Unrecognizable course: {exc.message}"
     return exc.message
 
 
@@ -216,7 +217,7 @@ def _print_courses(client: UcasClient, courses: list[Course], date: str) -> None
         print(f"  No courses found for {_pretty_date(date)}.")
         return
 
-    now = client.cached_now_ms()
+    now = client.server_now_ms()
     rows = [("#", "Course", "Teacher", "Time", "Status", "Sign-in window")]
     for index, course in enumerate(courses, start=1):
         state = sign_window_state(course, date, now)
@@ -278,14 +279,6 @@ def _sign(client: UcasClient, session: Session, identifier: str, label: str) -> 
     print(f"Signing in for {label}... ", end="", flush=True)
     try:
         result = client.sign(session.username, session.password, identifier)
-    except UcasSignError as exc:
-        print("failed.")
-        if exc.code == "SIGN_INCOMPLETE":
-            print("  ✗ UCAS accepted the request but has not confirmed it yet.")
-            print("    Reload (r) in a moment to check the course status.")
-        else:
-            print(f"  ✗ {_error_hint(exc)}")
-        return False
     except UcasError as exc:
         print("failed.")
         print(f"  ✗ {_error_hint(exc)}")
@@ -415,7 +408,7 @@ def _show_qr_refreshing(client: UcasClient, course: Course, label: str) -> None:
     print(f"Sign-in QR for '{label}': a new code is printed every {interval:g}s.")
     while True:
         timestamp = client.sign_timestamp()
-        payload = build_sign_url(course.id, timestamp)
+        payload = build_scan_url(course.id, timestamp)
         _print_qr(payload)
         print(f"  {payload}")
         print(f"  {_QR_HINT}")

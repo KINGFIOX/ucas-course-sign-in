@@ -46,24 +46,5 @@ class UcasAuthError(UcasError):
     """
 
 
-class UcasSignError(UcasError):
-    """The sign-in was refused, or accepted but not completed.
-
-    ``upstream_status`` / ``stu_sign_id`` / ``stu_sign_status`` mirror the
-    fields of the upstream answer.
-    """
-
-    def __init__(
-        self,
-        message: str,
-        code: str = "SIGN_FAILED",
-        stage: str = "sign",
-        *,
-        upstream_status: str = "",
-        stu_sign_id: str = "",
-        stu_sign_status: str = "",
-    ) -> None:
-        super().__init__(message, code, stage)
-        self.upstream_status = upstream_status
-        self.stu_sign_id = stu_sign_id
-        self.stu_sign_status = stu_sign_status
+class UcasUnrecognizableCourse(UcasError):
+    """The identifier is neither a course ID nor a timetable UUID (``BAD_IDENTIFIER``)."""

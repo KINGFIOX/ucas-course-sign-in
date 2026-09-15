@@ -26,11 +26,11 @@ import httpx
 
 from .error import (
     UcasAuthError,
-    UcasError,
     UcasJsonError,
     UcasNetworkError,
     UcasServerError,
     UcasTimeError,
+    UcasUnrecognizableCourse,
 )
 
 # --------------------------------------------------------------------------- #
@@ -162,75 +162,85 @@ def validate_credentials(username: str, password: str) -> None:
         raise UcasAuthError("Mail must not contain whitespace", "BAD_CREDENTIALS")
 
 
-def normalize_course_sched_id(raw: str) -> str | None:
+def normalize_course_sched_id(raw: str) -> str:
     """A course ID must be exactly 7 digits."""
     compact = raw.strip()
-    return compact if len(compact) == 7 and compact.isdigit() else None
+    assert len(compact) == 7 and compact.isdigit()
+    return compact
 
 
-def normalize_uuid(raw: str) -> str | None:
+def normalize_uuid(raw: str) -> str:
     """A UUID is a 32-character hex string; hyphens are allowed."""
     compact = raw.strip().replace("-", "")
-    if len(compact) == 32:
-        try:
-            int(compact, 16)
-        except ValueError:
-            return None
-        return compact.upper()
-    return None
+
+    int(compact, 16) # check if it is a heximal number
+
+    return compact.upper()
 
 
-def build_sign_url(course_sched_id: str, timestamp: int, user_id: str | None = None) -> str:
-    """Sign-in URL using a course ID."""
+def build_scan_url(course_sched_id: str, timestamp: int) -> str:
+    """Build the URL encoded into the sign-in QR code.
+
+    Deliberately carries **no** ``id`` parameter: the phone that scans the code
+    is already logged into the UCAS app, so the server learns who is signing in
+    from the app's own session. This mirrors the QR code the web version shows.
+    """
     params: dict[str, Any] = {"courseSchedId": course_sched_id, "timestamp": timestamp}
-    if user_id:
-        params["id"] = user_id
     return f"{SIGN_URL}?{urllib.parse.urlencode(params)}"
 
 
-def build_timetable_sign_url(uuid: str, timestamp: int, user_id: str | None = None) -> str:
-    """Sign-in URL using a UUID (``timeTableId``)."""
-    params: dict[str, Any] = {"timeTableId": uuid, "timestamp": timestamp}
-    if user_id:
-        params["id"] = user_id
+def build_sign_url(course_sched_id: str, timestamp: int, user_id: str) -> str:
+    """Build the URL used to sign in directly (no QR, no browser session).
+
+    Unlike :func:`build_scan_url` there is no app session to identify the
+    student, so ``user_id`` is required and sent as the ``id`` parameter.
+    """
+    params: dict[str, Any] = {
+        "courseSchedId": course_sched_id,
+        "timestamp": timestamp,
+        "id": user_id,
+    }
     return f"{SIGN_URL}?{urllib.parse.urlencode(params)}"
 
 
-def extract_clock_time(value: str) -> str | None:
+def build_timetable_sign_url(uuid: str, timestamp: int, user_id: str) -> str:
+    """Like :func:`build_sign_url`, but identifies the course by its timetable
+    UUID (``timeTableId``) instead of its course schedule ID.
+
+    Only a direct sign-in variant exists: the QR code is always built from the
+    course ID (see :func:`build_scan_url`).
+    """
+    params: dict[str, Any] = {
+        "timeTableId": uuid,
+        "timestamp": timestamp,
+        "id": user_id,
+    }
+    return f"{SIGN_URL}?{urllib.parse.urlencode(params)}"
+
+
+def extract_clock_time(value: str) -> str:
     """Extract ``10:25:00`` from ``2026-03-25 10:25:00``."""
-    if not value:
-        return None
     tail = value.strip().split()[-1]
     parts = tail.split(":")
-    if len(parts) < 2:
-        return None
-    try:
-        hour = int(parts[0])
-        minute = int(parts[1])
-        second = int(parts[2]) if len(parts) > 2 else 0
-    except ValueError:
-        return None
+    hour = int(parts[0])
+    minute = int(parts[1])
+    second = int(parts[2]) if len(parts) > 2 else 0
     if not (0 <= hour < 24 and 0 <= minute < 60 and 0 <= second < 60):
-        return None
+        raise NotImplementedError
     return f"{hour:02d}:{minute:02d}:{second:02d}"
 
 
-def parse_class_datetime(date: str, value: str) -> datetime | None:
+def parse_class_datetime(date: str, value: str) -> datetime:
     """Combine a course date and a timestamp string into a :class:`datetime`.
 
     The result is timezone-aware (``Asia/Shanghai``), so converting it to a
     timestamp does not depend on the process timezone.
     """
     clock = extract_clock_time(value)
-    if not clock:
-        return None
     compact = normalize_date(date)
-    try:
-        return datetime.strptime(f"{compact} {clock}", "%Y%m%d %H:%M:%S").replace(
-            tzinfo=UCAS_TIMEZONE
-        )
-    except ValueError:
-        return None
+    return datetime.strptime(f"{compact} {clock}", "%Y%m%d %H:%M:%S").replace(
+        tzinfo=UCAS_TIMEZONE
+    )
 
 
 def format_time_range(begin: str, end: str) -> str:
@@ -253,19 +263,13 @@ def format_date_from_ms(timestamp_ms: int) -> str:
 
 
 class UcasClient:
-    """Thin wrapper around the upstream iClass API.
-
-    An ``http_client`` can be injected for testing; otherwise a
-    :class:`httpx.Client` with timeouts is created automatically.
-    """
+    """Thin wrapper around the upstream iClass API."""
 
     def __init__(self) -> None:
         self._client = httpx.Client(
             timeout=httpx.Timeout(REQUEST_TIMEOUT, connect=REQUEST_TIMEOUT),
             follow_redirects=False,
         )
-        self._offset_ms: int = 0
-        self._offset_valid = False
 
     # -- Lifecycle -------------------------------------------------------- #
 
@@ -380,7 +384,8 @@ class UcasClient:
             raise NotImplementedError
 
         if not isinstance(result, list):
-            return []
+            raise NotImplementedError
+
         return [Course.from_upstream(item) for item in result if isinstance(item, dict)]
 
     # -- Sign-in ---------------------------------------------------------- #
@@ -390,7 +395,6 @@ class UcasClient:
         username: str,
         password: str,
         identifier: str,
-        timestamp: int | None = None,
     ) -> SignResult:
         """Log in and sign in for a course.
 
@@ -402,7 +406,7 @@ class UcasClient:
         course_id = normalize_course_sched_id(identifier)
         timetable_id = normalize_uuid(identifier)
         if course_id is None and timetable_id is None:
-            raise UcasError(
+            raise UcasUnrecognizableCourse(
                 "Invalid course ID or UUID format",
                 "BAD_IDENTIFIER",
                 "request",
@@ -410,8 +414,7 @@ class UcasClient:
 
         login = self.login(username, password)
 
-        if timestamp is None:
-            timestamp = self.sign_timestamp()
+        timestamp = self.sign_timestamp()
 
         if course_id is not None:
             url = build_sign_url(course_id, timestamp, login.user_id)
@@ -434,48 +437,25 @@ class UcasClient:
 
     # -- Clock calibration ------------------------------------------------ #
 
-    def _sync_server_now_ms(self) -> int | None:
-        """Ask the timestamp endpoint for the current server time.
-
-        Returns the estimated server time in milliseconds, or ``None`` when the
-        endpoint cannot be reached. The offset against the local clock is stored
-        for :meth:`cached_now_ms` and as a fallback.
-        """
-        try:
-            start_ms = time.time() * 1000
-            response = self._post(
-                f"{TIMESTAMP_URL}?id={random.randint(0, 999_999)}",
-                headers={"User-Agent": API_UA, "Connection": "Keep-Alive"},
-                timeout=TIMESTAMP_TIMEOUT,
-            )
-            data = self._json(response, "UPSTREAM_TIMESTAMP_BAD_JSON", "timestamp")
-            timestamp = data.get("timestamp")
-            if data.get("STATUS") == "0" and isinstance(timestamp, (int, float)):
-                received_ms = time.time() * 1000
-                latency_ms = max(0.0, received_ms - start_ms)
-                # The timestamp is taken mid-round-trip, so add half of it back.
-                server_now_ms = int(float(timestamp) + latency_ms / 2)
-                self._offset_ms = server_now_ms - int(received_ms)
-                self._offset_valid = True
-                return server_now_ms
-        except UcasError:
-            pass
-        return None
-
     def server_now_ms(self) -> int:
         """Current server time in milliseconds; asks the timestamp endpoint.
 
-        Falls back to the last computed offset, then to the local clock.
+        Falls back to the local clock when the endpoint cannot be reached.
         """
-        server_now_ms = self._sync_server_now_ms()
-        if server_now_ms is not None:
-            return server_now_ms
-        return int(time.time() * 1000) + (self._offset_ms if self._offset_valid else 0)
+        start_ms = time.time() * 1000
+        response = self._post(
+            f"{TIMESTAMP_URL}?id={random.randint(0, 999_999)}",
+            headers={"User-Agent": API_UA, "Connection": "Keep-Alive"},
+            timeout=TIMESTAMP_TIMEOUT,
+        )
+        data = self._json(response, "UPSTREAM_TIMESTAMP_BAD_JSON", "timestamp")
+        timestamp = data.get("timestamp")
+        if data.get("STATUS") == "0" and isinstance(timestamp, (int, float)):
+            latency_ms = max(0.0, time.time() * 1000 - start_ms)
+            # The timestamp is taken mid-round-trip, so add half of it back.
+            return int(float(timestamp) + latency_ms / 2)
 
-    def cached_now_ms(self) -> int:
-        """Current time in milliseconds using the last computed offset (no network)."""
-        offset = self._offset_ms if self._offset_valid else 0
-        return int(time.time() * 1000) + offset
+        raise NotImplementedError
 
     def sign_timestamp(self) -> int:
         """Timestamp accepted by the sign-in endpoint (clock buffer applied)."""
@@ -517,12 +497,10 @@ class SignWindow:
         return self.open_at <= timestamp_ms <= self.close_at
 
 
-def compute_sign_window(course: Course, date: str) -> SignWindow | None:
+def compute_sign_window(course: Course, date: str) -> SignWindow:
     """Compute the sign-in window: 30 minutes before class until class ends."""
     begin = parse_class_datetime(date, course.class_begin_time)
     end = parse_class_datetime(date, course.class_end_time)
-    if begin is None or end is None:
-        return None
     open_at = int((begin - timedelta(milliseconds=SIGN_WINDOW_BEFORE_MS)).timestamp() * 1000)
     close_at = int(end.timestamp() * 1000)
     return SignWindow(open_at=open_at, close_at=close_at)

@@ -45,7 +45,7 @@ from common.error import (
     UcasJsonError,
     UcasNetworkError,
     UcasServerError,
-    UcasSignError,
+    UcasUnrecognizableCourse,
 )
 
 from .logging import get_logger
@@ -216,15 +216,10 @@ def _sign_one(client: UcasClient, config: AutosignConfig, course: Course) -> Sig
     """Sign in for one course, turning every failure into a precise reason."""
     try:
         sign_result = client.sign(config.username, config.password, course.id)
-    except UcasSignError as exc:
-        if exc.code == "SIGN_INCOMPLETE":
-            reason = "UCAS accepted the request but has not confirmed it yet"
-        else:
-            # The upstream refused, e.g. "already signed" or "outside the window".
-            reason = f"rejected by UCAS: {exc.message}"
-        return SignDetail(course=course, error=reason)
     except UcasAuthError as exc:
         return SignDetail(course=course, error=f"credentials rejected: {exc.message}")
+    except UcasUnrecognizableCourse as exc:
+        return SignDetail(course=course, error=f"unrecognized course identifier: {exc.message}")
     except UcasNetworkError as exc:
         return SignDetail(course=course, error=f"network error: {exc.message}")
     except UcasServerError as exc:
