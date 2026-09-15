@@ -18,8 +18,11 @@ from __future__ import annotations
 
 import getpass
 import os
+import select
 import sys
+import termios
 import time
+import tty
 import unicodedata
 from dataclasses import dataclass
 
@@ -45,17 +48,6 @@ from common.error import (
     UcasServerError,
     UcasUnrecognizableCourse,
 )
-
-try:  # POSIX single-key input, used by the live QR refresh
-    import select
-    import termios
-    import tty
-
-    _HAS_TERMIOS = True
-except ImportError:  # pragma: no cover - Windows
-    _HAS_TERMIOS = False
-
-print(f"_HAS_TERMIOS: {_HAS_TERMIOS}")
 
 WINDOW_TEXT = {
     "open": "Open",
@@ -338,10 +330,10 @@ def _qr_lines(payload: str) -> list[str]:
 def _read_key(timeout: float) -> str | None:
     """Read a single keypress, or return ``None`` when ``timeout`` elapses.
 
-    Without a POSIX terminal (Windows, or output piped/redirected) there is no
-    keypress to read, so the timeout is simply slept through.
+    Without a terminal (output piped/redirected) there is no keypress to read,
+    so the timeout is simply slept through.
     """
-    if not (_HAS_TERMIOS and sys.stdin.isatty() and sys.stdout.isatty()):
+    if not (sys.stdin.isatty() and sys.stdout.isatty()):
         time.sleep(timeout)
         return None
     fd = sys.stdin.fileno()
