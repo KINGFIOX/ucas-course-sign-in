@@ -44,26 +44,36 @@ server.
 ## Requirements
 
 - Python **3.10+**
-- [uv](https://docs.astral.sh/uv/) recommended
+- [uv](https://docs.astral.sh/uv/) (or `pipx`) for installation
 
 ## Install & run
 
-### Install as a command (recommended)
+### Run from a clone (uv native, recommended)
+
+`uv` reads `pyproject.toml` and `uv.lock`, creates `.venv` on demand and runs
+the project's console scripts inside it — no manual `venv` activation and no
+separate install step:
 
 ```bash
-pipx install .
-tui
-# or
-pip install . && tui
+uv sync                  # create .venv and install the project (editable)
+uv run tui               # interactive course list / sign-in
+uv run server            # hourly auto sign-in scheduler
 ```
 
-When working from a clone, create a virtualenv with `uv` and install the
-project into it:
+Pass a specific interpreter on the first sync if you like:
+`uv sync --python=3.12`.
+
+### Install as a command
+
+To get `tui` / `server` on your `PATH` without keeping a checkout around, use
+`uv tool` (or `pipx`), which installs the app into its own managed
+environment:
 
 ```bash
-uv venv --python=3.12
-source .venv/bin/activate
-uv pip install -e .
+uv tool install .
+tui
+# or
+pipx install .
 tui
 ```
 
