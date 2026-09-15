@@ -25,10 +25,11 @@ import time
 from datetime import datetime, timedelta
 
 from common.api import UCAS_TIMEZONE, UcasClient
+from common.error import UcasError
 
 from .autosign import AutosignConfig, AutosignConfigError, run_once
-from .logging_setup import configure_logging, get_logger
-from .notify import Message, Notifier, NotifyConfigError, build_notifier
+from .logging import attach_notify_handler, configure_logging, get_logger
+from .notify import Notifier, NotifyConfigError, build_notifier
 
 logger = get_logger(__name__)
 
@@ -88,23 +89,28 @@ class Server:
     def run_pass(self) -> None:
         """Run one pass, keeping the server alive across unexpected errors.
 
-        ``run_once`` already handles expected upstream failures; this is the last
-        line of defence so a bug or a surprise response cannot kill an unattended
-        process. The traceback is logged (and pushed) instead.
+        ``run_once`` already handles every expected upstream failure; this is the
+        last line of defence so a bug or a surprise response cannot kill an
+        unattended process. The record is logged at ``ERROR``, so the traceback
+        goes to stderr and the notify handler pushes the short message.
         """
         try:
-            run_once(self.client, self.config, self.notifier)
+            run_once(self.client, self.config)
+        except UcasError as exc:
+            # run_once already catches the expected ones, so this is a bug.
+            logger.exception(
+                "unhandled UCAS error: %s (code %s, stage %s)",
+                exc.message,
+                exc.code,
+                exc.stage,
+                extra={"title": "UCAS auto sign-in: runtime error"},
+            )
         except Exception as exc:  # noqa: BLE001 - a server must not die here
-            logger.exception("automatic sign-in pass failed; keeping the server alive")
-            try:
-                self.notifier.send(
-                    Message(
-                        title="UCAS auto sign-in: runtime error",
-                        body=f"{type(exc).__name__}: {exc}",
-                    )
-                )
-            except Exception:  # noqa: BLE001 - notification is best-effort
-                pass
+            logger.exception(
+                "unexpected failure: %s",
+                exc,
+                extra={"title": "UCAS auto sign-in: runtime error"},
+            )
 
     def shutdown(self) -> None:
         """Release the HTTP client and the notifier."""
@@ -124,16 +130,19 @@ def main(argv: list[str] | None = None) -> int:
     try:
         config = AutosignConfig.from_env()
     except AutosignConfigError as exc:
-        logger.error("configuration error: %s", exc)
+        logger.fatal("configuration error: %s", exc)
         return 2
 
     client = UcasClient()
     try:
         notifier = build_notifier()
     except NotifyConfigError as exc:
-        logger.error("notification configuration error: %s", exc)
+        logger.fatal("notification configuration error: %s", exc)
         client.close()
         return 2
+
+    # Every WARNING or worse is pushed from now on.
+    attach_notify_handler(notifier)
 
     server = Server(config, client, notifier)
     install_signal_handlers()
@@ -165,7 +174,8 @@ Run with the UCAS clock: the schedule is always evaluated in Asia/Shanghai,
 which is hardcoded and does not depend on the container's TZ. No local state
 is kept -- every pass re-fetches the courses and trusts the signed flag UCAS
 returns.
-Notifications are pushed to Feishu; see README.md for details.
+Notifications are log-driven: every WARNING or worse from this package is
+pushed to Feishu. See README.md for details.
 """
 
 

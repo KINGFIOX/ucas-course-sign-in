@@ -4,7 +4,7 @@ Ports the three Route Handlers of the original Next.js project:
 
 * ``/api/course-uuid/query``     -> :meth:`UcasClient.query_courses`
 * ``/api/course-uuid/sign``      -> :meth:`UcasClient.sign`
-* ``/api/course-uuid/timestamp`` -> :meth:`UcasClient.get_server_offset_ms`
+* ``/api/course-uuid/timestamp`` -> :meth:`UcasClient.server_now_ms`
 
 The difference is that every request is issued directly from this machine
 instead of going through Vercel, so authentication, same-origin checks and
@@ -23,6 +23,15 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 import httpx
+
+from .error import (
+    UcasAuthError,
+    UcasError,
+    UcasJsonError,
+    UcasNetworkError,
+    UcasServerError,
+    UcasTimeError,
+)
 
 # --------------------------------------------------------------------------- #
 # Constants (kept in sync with the upstream Android client)
@@ -55,32 +64,11 @@ TIMESTAMP_TIMEOUT = 6.0
 #: to be shifted back a little for the sign-in endpoint to accept it.
 SIGN_TIMESTAMP_BUFFER_MS = 3 * 1000
 
-#: How long a cached server-time offset stays valid.
-TIME_OFFSET_TTL_MS = 30 * 1000
-
 MAX_USERNAME_LENGTH = 40
 MAX_PASSWORD_LENGTH = 80
 
 #: Sign-in window opens this long before the class starts.
 SIGN_WINDOW_BEFORE_MS = 30 * 60 * 1000
-
-
-# --------------------------------------------------------------------------- #
-# Errors
-# --------------------------------------------------------------------------- #
-
-
-class UcasError(Exception):
-    """Unified exception carrying an error code and the stage that failed."""
-
-    def __init__(self, message: str, code: str = "UNEXPECTED_ERROR", stage: str = "request") -> None:
-        super().__init__(message)
-        self.message = message
-        self.code = code
-        self.stage = stage
-
-    def __str__(self) -> str:  # pragma: no cover - convenience for logging
-        return self.message
 
 
 # --------------------------------------------------------------------------- #
@@ -156,22 +144,22 @@ def build_login_body(username: str, password: str) -> str:
 def normalize_date(value: str) -> str:
     """Normalize ``yyyy-MM-dd`` / ``yyyyMMdd`` to ``yyyyMMdd``.
 
-    Raises :class:`UcasError` on invalid input.
+    Raises :class:`UcasTimeError` on invalid input.
     """
     compact = value.replace("-", "").replace("/", "").strip()
     if len(compact) != 8 or not compact.isdigit():
-        raise UcasError("Invalid date format; use yyyyMMdd or yyyy-MM-dd", "BAD_DATE", "request")
+        raise UcasTimeError("Invalid date format; use yyyyMMdd or yyyy-MM-dd", "BAD_DATE")
     return compact
 
 
 def validate_credentials(username: str, password: str) -> None:
     """Validate credentials with the same constraints as the web frontend."""
     if not username or not password:
-        raise UcasError("Mail and password are required", "BAD_CREDENTIALS", "request")
+        raise UcasAuthError("Mail and password are required", "BAD_CREDENTIALS")
     if len(username) > MAX_USERNAME_LENGTH or len(password) > MAX_PASSWORD_LENGTH:
-        raise UcasError("Invalid mail or password format", "BAD_CREDENTIALS", "request")
+        raise UcasAuthError("Invalid mail or password format", "BAD_CREDENTIALS")
     if any(ch.isspace() for ch in username):
-        raise UcasError("Mail must not contain whitespace", "BAD_CREDENTIALS", "request")
+        raise UcasAuthError("Mail must not contain whitespace", "BAD_CREDENTIALS")
 
 
 def normalize_course_sched_id(raw: str) -> str | None:
@@ -271,21 +259,18 @@ class UcasClient:
     :class:`httpx.Client` with timeouts is created automatically.
     """
 
-    def __init__(self, http_client: httpx.Client | None = None) -> None:
-        self._owns_client = http_client is None
-        self._client = http_client or httpx.Client(
+    def __init__(self) -> None:
+        self._client = httpx.Client(
             timeout=httpx.Timeout(REQUEST_TIMEOUT, connect=REQUEST_TIMEOUT),
             follow_redirects=False,
         )
         self._offset_ms: int = 0
         self._offset_valid = False
-        self._offset_fetched_at: float = 0.0
 
     # -- Lifecycle -------------------------------------------------------- #
 
     def close(self) -> None:
-        if self._owns_client:
-            self._client.close()
+        self._client.close()
 
     def __enter__(self) -> "UcasClient":
         return self
@@ -299,26 +284,30 @@ class UcasClient:
         try:
             return self._client.post(url, **kwargs)
         except httpx.TimeoutException as exc:
-            raise UcasError("Request timed out; check your network", "NETWORK_TIMEOUT", "request") from exc
+            raise UcasNetworkError(
+                "Request timed out; check your network", "NETWORK_TIMEOUT"
+            ) from exc
         except httpx.HTTPError as exc:
-            raise UcasError(f"Network error: {exc}", "NETWORK_ERROR", "request") from exc
+            raise UcasNetworkError(f"Network error: {exc}", "NETWORK_ERROR") from exc
 
     def _get(self, url: str, **kwargs: Any) -> httpx.Response:
         try:
             return self._client.get(url, **kwargs)
         except httpx.TimeoutException as exc:
-            raise UcasError("Request timed out; check your network", "NETWORK_TIMEOUT", "request") from exc
+            raise UcasNetworkError(
+                "Request timed out; check your network", "NETWORK_TIMEOUT"
+            ) from exc
         except httpx.HTTPError as exc:
-            raise UcasError(f"Network error: {exc}", "NETWORK_ERROR", "request") from exc
+            raise UcasNetworkError(f"Network error: {exc}", "NETWORK_ERROR") from exc
 
     @staticmethod
     def _json(response: httpx.Response, code: str, stage: str) -> dict[str, Any]:
         try:
             data = response.json()
         except ValueError as exc:
-            raise UcasError("Upstream returned non-JSON data", code, stage) from exc
+            raise UcasJsonError("Upstream returned non-JSON data", code, stage) from exc
         if not isinstance(data, dict):
-            raise UcasError("Upstream returned an unexpected format", code, stage)
+            raise UcasJsonError("Upstream returned an unexpected format", code, stage)
         return data
 
     # -- Login ------------------------------------------------------------ #
@@ -335,7 +324,7 @@ class UcasClient:
             },
         )
         if response.status_code != 200:
-            raise UcasError(
+            raise UcasServerError(
                 f"Login endpoint HTTP error: {response.status_code}",
                 "UPSTREAM_LOGIN_HTTP",
                 "login",
@@ -347,7 +336,9 @@ class UcasClient:
         user_id = str(result.get("id") or "")
 
         if data.get("STATUS") != "0" or not session_id or not user_id:
-            raise UcasError("Login failed; check your mail and password", "AUTH_FAILED", "login")
+            raise UcasAuthError(
+                "Login failed; check your mail and password", "AUTH_FAILED", "login"
+            )
 
         return LoginResult(session_id=session_id, user_id=user_id)
 
@@ -358,30 +349,36 @@ class UcasClient:
         normalized_date = normalize_date(date)
         login = self.login(username, password)
 
-        url = (
-            f"{SCHEDULE_URL}?"
-            + urllib.parse.urlencode({"id": login.user_id, "dateStr": normalized_date})
+        url = f"{SCHEDULE_URL}?" + urllib.parse.urlencode(
+            {"id": login.user_id, "dateStr": normalized_date}
         )
         response = self._get(
             url,
             headers={"sessionId": login.session_id, "User-Agent": API_UA},
         )
         if response.status_code != 200:
-            raise UcasError(
+            raise UcasServerError(
                 f"Schedule endpoint HTTP error: {response.status_code}",
                 "UPSTREAM_SCHEDULE_HTTP",
                 "schedule",
             )
 
         data = self._json(response, "UPSTREAM_SCHEDULE_BAD_JSON", "schedule")
-        if data.get("STATUS") != "0":
-            raise UcasError(
-                "Schedule query failed or there are no courses that day",
+        # STATUS: "0" = ok, "1" = real error, "2" = no courses that day.
+        status = str(data.get("STATUS") or "")
+        if status == "0":
+            result = data.get("result")
+        elif status == "2":
+            return []
+        elif status == "1":
+            raise UcasServerError(
+                str(data.get("ERRMSG") or data.get("msg") or "Schedule query failed"),
                 "UPSTREAM_SCHEDULE_STATUS",
                 "schedule",
             )
+        else:
+            raise NotImplementedError
 
-        result = data.get("result")
         if not isinstance(result, list):
             return []
         return [Course.from_upstream(item) for item in result if isinstance(item, dict)]
@@ -399,7 +396,8 @@ class UcasClient:
 
         ``identifier`` may be a 7-digit course ID or a 32-character hex UUID.
         When ``timestamp`` is omitted, a clock-calibrated server timestamp is
-        used.
+        used. Returns a :class:`SignResult` on success; any failure is raised
+        as a :class:`UcasError` subclass.
         """
         course_id = normalize_course_sched_id(identifier)
         timetable_id = normalize_uuid(identifier)
@@ -425,7 +423,7 @@ class UcasClient:
             headers={"sessionId": login.session_id, "User-Agent": API_UA},
         )
         if response.status_code != 200:
-            raise UcasError(
+            raise UcasServerError(
                 f"Sign-in endpoint HTTP error: {response.status_code}",
                 "UPSTREAM_SIGN_HTTP",
                 "sign",
@@ -436,16 +434,13 @@ class UcasClient:
 
     # -- Clock calibration ------------------------------------------------ #
 
-    def get_server_offset_ms(self, force: bool = False) -> int:
-        """Return ``server time - local time`` in milliseconds.
+    def _sync_server_now_ms(self) -> int | None:
+        """Ask the timestamp endpoint for the current server time.
 
-        The result is cached for :data:`TIME_OFFSET_TTL_MS`. On failure it
-        falls back to the previous cached value, then to 0.
+        Returns the estimated server time in milliseconds, or ``None`` when the
+        endpoint cannot be reached. The offset against the local clock is stored
+        for :meth:`cached_now_ms` and as a fallback.
         """
-        now_ms = time.time() * 1000
-        if not force and self._offset_valid and now_ms - self._offset_fetched_at < TIME_OFFSET_TTL_MS:
-            return self._offset_ms
-
         try:
             start_ms = time.time() * 1000
             response = self._post(
@@ -456,29 +451,29 @@ class UcasClient:
             data = self._json(response, "UPSTREAM_TIMESTAMP_BAD_JSON", "timestamp")
             timestamp = data.get("timestamp")
             if data.get("STATUS") == "0" and isinstance(timestamp, (int, float)):
-                latency_ms = max(0.0, time.time() * 1000 - start_ms)
-                server_time = float(timestamp) + latency_ms / 2
-                self._offset_ms = int(server_time - time.time() * 1000)
+                received_ms = time.time() * 1000
+                latency_ms = max(0.0, received_ms - start_ms)
+                # The timestamp is taken mid-round-trip, so add half of it back.
+                server_now_ms = int(float(timestamp) + latency_ms / 2)
+                self._offset_ms = server_now_ms - int(received_ms)
                 self._offset_valid = True
-                self._offset_fetched_at = time.time() * 1000
-                return self._offset_ms
+                return server_now_ms
         except UcasError:
             pass
-
-        if self._offset_valid:
-            return self._offset_ms
-
-        self._offset_ms = 0
-        self._offset_valid = True
-        self._offset_fetched_at = time.time() * 1000
-        return 0
+        return None
 
     def server_now_ms(self) -> int:
-        """Calibrated current time in milliseconds; may trigger a sync request."""
-        return int(time.time() * 1000) + self.get_server_offset_ms()
+        """Current server time in milliseconds; asks the timestamp endpoint.
+
+        Falls back to the last computed offset, then to the local clock.
+        """
+        server_now_ms = self._sync_server_now_ms()
+        if server_now_ms is not None:
+            return server_now_ms
+        return int(time.time() * 1000) + (self._offset_ms if self._offset_valid else 0)
 
     def cached_now_ms(self) -> int:
-        """Current time in milliseconds using the cached offset (no network)."""
+        """Current time in milliseconds using the last computed offset (no network)."""
         offset = self._offset_ms if self._offset_valid else 0
         return int(time.time() * 1000) + offset
 
@@ -488,7 +483,12 @@ class UcasClient:
 
 
 def parse_sign_response(data: dict[str, Any]) -> SignResult:
-    """Parse the upstream sign-in response, supporting both ``STATUS`` and ``ERRCODE`` styles."""
+    """Parse the upstream sign-in response, supporting both ``STATUS`` and ``ERRCODE`` styles.
+
+    Returns a :class:`SignResult` on success. The failure shapes have not been
+    pinned down yet, so for now anything else raises :class:`NotImplementedError`
+    -- a deliberate placeholder, not a finished error path.
+    """
     result = data.get("result") or {}
     if not isinstance(result, dict):
         result = {}
@@ -496,34 +496,11 @@ def parse_sign_response(data: dict[str, Any]) -> SignResult:
     upstream_status = str(data.get("STATUS") or data.get("ERRCODE") or "")
     stu_sign_id = str(result.get("stuSignId") or "")
     stu_sign_status = str(result.get("stuSignStatus") or "")
-    # Upstream messages are passed through verbatim (they may be in Chinese).
-    upstream_message = str(
-        result.get("msg")
-        or data.get("ERRMSG")
-        or data.get("msg")
-        or data.get("message")
-        or ""
-    )
 
     if upstream_status == "0" and stu_sign_status == "1":
         return SignResult(True, "Sign-in successful", upstream_status, stu_sign_id, stu_sign_status)
 
-    if upstream_status == "0" and stu_sign_status and stu_sign_status != "1":
-        return SignResult(
-            False,
-            "Sign-in request submitted but not completed",
-            upstream_status,
-            stu_sign_id,
-            stu_sign_status,
-        )
-
-    return SignResult(
-        False,
-        upstream_message or "Sign-in failed, please try again later",
-        upstream_status,
-        stu_sign_id,
-        stu_sign_status,
-    )
+    raise NotImplementedError
 
 
 # --------------------------------------------------------------------------- #

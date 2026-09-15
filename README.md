@@ -136,13 +136,12 @@ What each run does:
 | No courses today | silent | INFO |
 | A course is already signed in (upstream) | silent | INFO |
 | Courses today, but none is in its sign-in window | silent | INFO |
-| A course is in its sign-in window and not yet signed, sign in success | push | WARN |
-| A course is in its sign-in window and not yet signed, sign in success | push | ERROR |
-| The course list cannot be fetched | push | WARN |
-| configuration error | -- | FATAL |
-| notification configuration failed | -- | FATAL |
-| ucas fetch date error | push | FATAL |
-| 
+| A course is in its sign-in window and not yet signed, sign in succeeds | push | WARNING |
+| A course is in its sign-in window and not yet signed, sign in fails | push | ERROR |
+| The course list cannot be fetched | push | WARNING |
+| Today's date cannot be fetched | push | CRITICAL |
+| Configuration error (server exits) | no push | CRITICAL |
+| Notification configuration error (server exits) | no push | CRITICAL |
 
 "In its sign-in window" means from 30 minutes before the class starts until the
 class ends -- the same window the upstream enforces. Because the window lasts
@@ -210,13 +209,20 @@ pass immediately on start.
 
 The server logs through the Python standard `logging` module to stderr, one line
 per event, timestamped in `Asia/Shanghai`: `docker compose logs -f` is all you
-need to follow it.
+need to follow it. Notifications are log-driven too (see below).
 
 ### Notifications (Feishu)
 
 Feishu / Lark (飞书) is the only notification provider. The bot posts a `text`
 message to the group that owns the webhook, so keep that group to yourself only
 if the messages should stay private.
+
+Notifications are **log-driven**: a `logging` handler pushes every record at
+`WARNING` or above from the server's own loggers. So a successful run (logged at
+`INFO`) stays silent, while a sign-in failure (`WARNING`) or a failed fetch
+(`ERROR`) is pushed once. Add `extra={"title": ...}` to a log call to control
+the message title. Library noise (`httpx`, ...) and anything below `WARNING` are
+never pushed.
 
 | Variable | Default | Description |
 | --- | --- | --- |
@@ -226,10 +232,10 @@ if the messages should stay private.
 The webhook already contains the bot token. With the "signature" mode, set
 `UCAS_FEISHU_SECRET`; `timestamp` and `sign` are added to the JSON body. With the
 "custom keyword" mode, make sure the keyword appears in the messages -- the
-runner's titles already contain `UCAS`. Messages are sent as Feishu `text`. If
-`UCAS_FEISHU_WEBHOOK` is missing, the runner exits with a configuration error
+notifications' titles already contain `UCAS`. Messages are sent as Feishu `text`.
+If `UCAS_FEISHU_WEBHOOK` is missing, the server exits with a configuration error
 instead of silently dropping notifications; a failed push never breaks the
-sign-in run, it is only logged.
+sign-in run, it is only written to stderr by `logging`.
 
 ### Auto-sign environment variables
 
@@ -242,10 +248,9 @@ the remaining variables are:
 | `UCAS_PASSWORD` | -- | Password (from `.env`) |
 | `UCAS_RUN_ON_START` | `1` | Run a pass immediately on server start |
 
-A non-zero schedule `STATUS` from the upstream is ambiguous: it is returned both
-when the query really failed and when there are simply no courses that day. The
-server always treats it as an error and pushes it, so a genuine upstream problem
-is never silently swallowed.
+The schedule endpoint reports three states in its `STATUS` field, and the server
+now tells them apart: `0` = ok, `1` = a real error (surfaced and pushed), `2` =
+no courses that day (quiet).
 
 ### How the schedule works
 
@@ -288,7 +293,8 @@ Details preserved from the original port:
 ├─ src/
 │  ├─ common/                 # shared logic, used by both front ends
 │  │  ├─ __init__.py          #   version
-│  │  └─ api.py               #   upstream client + pure logic (login / schedule / sign-in / clock)
+│  │  ├─ api.py               #   upstream client + pure logic (login / schedule / sign-in / clock)
+│  │  └─ error.py             #   UcasError hierarchy
 │  ├─ tui/                    # interactive front end
 │  │  ├─ __main__.py          #   python -m tui
 │  │  └─ tui.py               #   prompt flow and QR code
@@ -296,7 +302,7 @@ Details preserved from the original port:
 │     ├─ __main__.py          #   python -m server
 │     ├─ autosign.py          #   one-pass sign-in + notification
 │     ├─ server.py            #   hourly scheduler
-│     ├─ logging_setup.py     #   stdlib logging (stderr, UCAS timezone)
+│     ├─ logging.py           #   stdlib logging + notify handler (stderr/Push)
 │     └─ notify.py            #   Feishu notifications
 ```
 

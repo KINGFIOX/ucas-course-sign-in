@@ -30,13 +30,20 @@ from common.api import (
     Course,
     SignResult,
     UcasClient,
-    UcasError,
     build_sign_url,
     format_date_from_ms,
     format_time_range,
     normalize_course_sched_id,
     normalize_uuid,
     sign_window_state,
+)
+from common.error import (
+    UcasAuthError,
+    UcasError,
+    UcasJsonError,
+    UcasNetworkError,
+    UcasServerError,
+    UcasSignError,
 )
 
 try:  # POSIX single-key input, used by the live QR refresh
@@ -131,6 +138,22 @@ def _pretty_date(compact: str) -> str:
     return f"{compact[:4]}-{compact[4:6]}-{compact[6:]}"
 
 
+def _error_hint(exc: UcasError) -> str:
+    """A short, type-aware line explaining an error to an interactive user."""
+    if isinstance(exc, UcasAuthError):
+        return f"Credentials rejected: {exc.message}"
+    if isinstance(exc, UcasNetworkError):
+        return f"Network problem: {exc.message}"
+    if isinstance(exc, UcasServerError):
+        return f"UCAS server error: {exc.message}"
+    if isinstance(exc, UcasJsonError):
+        return f"Unexpected reply from UCAS: {exc.message}"
+    if isinstance(exc, UcasSignError):
+        detail = f" (upstream status {exc.upstream_status})" if exc.upstream_status else ""
+        return f"{exc.message}{detail}"
+    return exc.message
+
+
 # --------------------------------------------------------------------------- #
 # Login
 # --------------------------------------------------------------------------- #
@@ -140,7 +163,8 @@ def _login(client: UcasClient) -> Session:
     """Prompt for the mail and password until the upstream accepts them.
 
     The mail is always entered interactively; neither a command-line argument
-    nor an environment variable pre-fills it.
+    nor an environment variable pre-fills it. Rejected credentials go back to
+    the prompts; a network or upstream hiccup is retried with the same ones.
     """
     while True:
         username = _ask("Mail")
@@ -152,16 +176,29 @@ def _login(client: UcasClient) -> Session:
             print("Password is required.")
             continue
 
-        print("Signing in... ", end="", flush=True)
-        try:
-            client.login(username, password)
-        except UcasError as exc:
-            print("failed.")
-            print(f"  {exc.message}")
-            print()
-            continue
-        print("done.")
-        return Session(username=username, password=password)
+        while True:
+            print("Signing in... ", end="", flush=True)
+            try:
+                client.login(username, password)
+            except UcasAuthError as exc:
+                print("failed.")
+                print(f"  {_error_hint(exc)}")
+                print()
+                break  # ask for the mail and password again
+            except (UcasNetworkError, UcasServerError, UcasJsonError) as exc:
+                print("failed.")
+                print(f"  {_error_hint(exc)}")
+                print("  Retrying in a moment; press Ctrl+C to give up.")
+                print()
+                time.sleep(2.0)
+                continue
+            except UcasError as exc:
+                print("failed.")
+                print(f"  {_error_hint(exc)}")
+                print()
+                break
+            print("done.")
+            return Session(username=username, password=password)
 
 
 # --------------------------------------------------------------------------- #
@@ -213,7 +250,7 @@ def _load_courses(client: UcasClient, session: Session, date: str) -> list[Cours
         courses = client.query_courses(session.username, session.password, date)
     except UcasError as exc:
         print("failed.")
-        print(f"  {exc.message}")
+        print(f"  {_error_hint(exc)}")
         return []
     print("done.")
     _print_courses(client, courses, date)
@@ -226,15 +263,11 @@ def _load_courses(client: UcasClient, session: Session, date: str) -> list[Cours
 
 
 def _report_sign(result: SignResult) -> bool:
-    if result.success:
-        print("done.")
-        detail = f" (sign-in record {result.stu_sign_id})" if result.stu_sign_id else ""
-        print(f"  ✓ {result.message}{detail}")
-    else:
-        print("failed.")
-        detail = f" (upstream status {result.upstream_status})" if result.upstream_status else ""
-        print(f"  ✗ {result.message}{detail}")
-    return result.success
+    """Print a successful sign-in (failures are raised, never returned)."""
+    print("done.")
+    detail = f" (sign-in record {result.stu_sign_id})" if result.stu_sign_id else ""
+    print(f"  ✓ {result.message}{detail}")
+    return True
 
 
 def _sign(client: UcasClient, session: Session, identifier: str, label: str) -> bool:
@@ -245,9 +278,17 @@ def _sign(client: UcasClient, session: Session, identifier: str, label: str) -> 
     print(f"Signing in for {label}... ", end="", flush=True)
     try:
         result = client.sign(session.username, session.password, identifier)
+    except UcasSignError as exc:
+        print("failed.")
+        if exc.code == "SIGN_INCOMPLETE":
+            print("  ✗ UCAS accepted the request but has not confirmed it yet.")
+            print("    Reload (r) in a moment to check the course status.")
+        else:
+            print(f"  ✗ {_error_hint(exc)}")
+        return False
     except UcasError as exc:
         print("failed.")
-        print(f"  {exc.message}")
+        print(f"  ✗ {_error_hint(exc)}")
         return False
     return _report_sign(result)
 
@@ -468,6 +509,9 @@ def main(argv: list[str] | None = None, *, client: UcasClient | None = None) -> 
     except KeyboardInterrupt:
         print("\nInterrupted.")
         return 130
+    except UcasError as exc:
+        print(f"\nError: {_error_hint(exc)}")
+        return 1
     finally:
         active_client.close()
     return 0

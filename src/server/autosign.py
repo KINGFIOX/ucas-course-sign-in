@@ -6,10 +6,13 @@ currently open, and pushes the outcome to a phone.
 
 Design goals, in the order the request stated them:
 
-* **There is a class and it is in the sign-in window** -- sign in and push the
-  result (success *and* failure are both pushed).
-* **There is no class, or nothing is actionable** -- stay quiet.
-* **Fetching the course list fails** -- push the error.
+* **There is a class and it is in the sign-in window** -- sign in; a failure is
+  logged at ``WARNING`` and therefore pushed by the notify handler.
+* **There is no class, or nothing is actionable** -- log at ``INFO``, stay quiet.
+* **Fetching the course list fails** -- log at ``ERROR`` and push the error.
+
+Notifications are not sent from here directly: the module only logs, and
+:mod:`server.logging` turns every ``WARNING`` or worse into a push.
 
 The run is *idempotent per day*: the course list is re-fetched from UCAS on
 every run and a course that is already marked as signed upstream is never
@@ -23,8 +26,9 @@ command is intentionally not exposed; the Docker image runs the server.
 
 from __future__ import annotations
 
+import logging
 import os
-from collections.abc import Callable
+import time
 from dataclasses import dataclass, field
 from typing import Mapping
 
@@ -32,13 +36,19 @@ from common.api import (
     Course,
     SignResult,
     UcasClient,
-    UcasError,
     format_date_from_ms,
     sign_window_state,
 )
+from common.error import (
+    UcasAuthError,
+    UcasError,
+    UcasJsonError,
+    UcasNetworkError,
+    UcasServerError,
+    UcasSignError,
+)
 
-from .logging_setup import get_logger
-from .notify import Message, Notifier, NotifyConfigError
+from .logging import get_logger
 
 logger = get_logger(__name__)
 
@@ -130,35 +140,28 @@ class AutosignResult:
 # --------------------------------------------------------------------------- #
 
 
-def run_once(
-    client: UcasClient,
-    config: AutosignConfig,
-    notifier: Notifier | None = None,
-    log: Callable[[str], None] | None = None,
-) -> AutosignResult:
+def run_once(client: UcasClient, config: AutosignConfig) -> AutosignResult:
     """Fetch today's courses and sign in for everything actionable.
 
-    Never raises for expected upstream problems -- those become an
-    :class:`AutosignResult` and (where required) a push. ``log`` overrides the
-    default logger (used by tests).
+    Never raises for expected upstream problems -- those are logged (and, at
+    ``WARNING``/``ERROR``, pushed by the notify handler) and turned into an
+    :class:`AutosignResult`.
     """
-    emit = log if log is not None else logger.info
-
     # 1. Which day are we signing for? The calibrated UCAS server clock decides.
     try:
         date = format_date_from_ms(client.server_now_ms())
     except UcasError as exc:
-        return _fail_fetch(notifier, "", exc, emit)
+        return _fail_fetch("", exc, logging.FATAL)
 
-    # 2. Load the schedule. A non-zero STATUS is ambiguous (real error or "no
-    #    courses today"), so it is always surfaced as an error and pushed.
+    # 2. Load the schedule. The endpoint now tells "no courses today" (STATUS 2,
+    #    returned as an empty list) apart from a real error (raised).
     try:
         courses = client.query_courses(config.username, config.password, date)
     except UcasError as exc:
-        return _fail_fetch(notifier, date, exc, emit)
+        return _fail_fetch(date, exc, logging.WARNING)
 
     if not courses:
-        emit(f"{date}: no courses -- staying silent")
+        logger.info("%s: no courses -- staying silent", date)
         return AutosignResult(date=date, status="no-courses")
 
     # 3. Pick the courses that still need a sign-in. UCAS itself is the source
@@ -171,73 +174,108 @@ def run_once(
             continue
         window = sign_window_state(course, date, now_ms)
         if window != "open":
-            emit(f"{date}: skip {course.course_name or course.id} (window: {window})")
+            logger.info("%s: skip %s (window: %s)", date, course.course_name or course.id, window)
             continue
         pending.append(course)
 
     if not pending:
-        emit(f"{date}: {len(courses)} course(s), nothing to sign in -- staying silent")
+        logger.info("%s: %d course(s), nothing to sign in -- staying silent", date, len(courses))
         return AutosignResult(date=date, status="idle")
 
-    # 4. Sign in.
+    # 4. Sign in. Each course is logged at INFO; the run as a whole is rolled up
+    #    into one WARNING (success) / ERROR (failure) below, so the notify
+    #    handler pushes at most one message per outcome instead of per course.
     result = AutosignResult(date=date, status="signed")
     for course in pending:
         outcome = _sign_one(client, config, course)
         if outcome.ok:
             result.signed.append(outcome)
-            emit(f"{date}: signed in for {course.course_name or course.id}")
+            logger.info("%s: signed in for %s", date, course.course_name or course.id)
         else:
             result.failed.append(outcome)
-            emit(f"{date}: sign-in failed for {course.course_name or course.id}: {outcome.reason}")
+            logger.info(
+                "%s: sign-in failed for %s: %s",
+                date,
+                course.course_name or course.id,
+                outcome.reason,
+            )
+
+    if result.signed:
+        title, body = _success_message(date, result.signed)
+        logger.warning(body, extra={"title": title})
 
     if result.failed:
         result.status = "failed"
-
-    # 5. Push the outcome(s).
-    if result.signed:
-        _push(notifier, _success_message(date, result.signed), emit)
-    if result.failed:
-        _push(notifier, _failure_message(date, result.failed), emit)
+        title, body = _failure_message(date, result.failed)
+        logger.error(body, extra={"title": title})
 
     return result
 
 
 def _sign_one(client: UcasClient, config: AutosignConfig, course: Course) -> SignDetail:
+    """Sign in for one course, turning every failure into a precise reason."""
     try:
         sign_result = client.sign(config.username, config.password, course.id)
+    except UcasSignError as exc:
+        if exc.code == "SIGN_INCOMPLETE":
+            reason = "UCAS accepted the request but has not confirmed it yet"
+        else:
+            # The upstream refused, e.g. "already signed" or "outside the window".
+            reason = f"rejected by UCAS: {exc.message}"
+        return SignDetail(course=course, error=reason)
+    except UcasAuthError as exc:
+        return SignDetail(course=course, error=f"credentials rejected: {exc.message}")
+    except UcasNetworkError as exc:
+        return SignDetail(course=course, error=f"network error: {exc.message}")
+    except UcasServerError as exc:
+        return SignDetail(course=course, error=f"UCAS server error: {exc.message}")
+    except UcasJsonError as exc:
+        return SignDetail(course=course, error=f"unexpected UCAS reply: {exc.message}")
     except UcasError as exc:
         return SignDetail(course=course, error=exc.message)
     return SignDetail(course=course, result=sign_result)
 
 
-def _fail_fetch(
-    notifier: Notifier | None,
-    date: str,
-    exc: UcasError,
-    emit: Callable[[str], None],
-) -> AutosignResult:
-    label = date or "today"
-    emit(f"{label}: could not fetch courses: {exc.message}")
-    _push(
-        notifier,
-        Message(
-            title="UCAS auto sign-in: failed to fetch courses",
-            body=f"Date: {_pretty_date(label)}\nError: {exc.message}\nCode: {exc.code}",
-        ),
-        emit,
+def _fail_fetch(date: str, exc: UcasError, level: int = logging.WARNING) -> AutosignResult:
+    """Report a failed course fetch, naming the failure precisely.
+
+    A network or upstream problem is transient and the next hourly run retries
+    it; rejected credentials will keep failing until ``.env`` is fixed, so the
+    notification says so instead of looking like a random glitch. A failure to
+    even determine today's date is logged at ``CRITICAL``.
+    """
+    label = date or format_date_from_ms(int(time.time() * 1000))
+    title, kind = _fetch_error(exc)
+    logger.log(
+        level,
+        "%s: %s\nDate: %s\nError: %s\nCode: %s\nStage: %s",
+        kind,
+        _describe(exc),
+        _pretty_date(label),
+        exc.message,
+        exc.code,
+        exc.stage,
+        extra={"title": f"UCAS auto sign-in: {title}"},
     )
     return AutosignResult(date=date, status="error", error=exc.message)
 
 
-def _push(notifier: Notifier | None, message: Message, emit: Callable[[str], None]) -> None:
-    if notifier is None:
-        return
-    try:
-        notifier.send(message)
-    except NotifyConfigError:
-        raise
-    except Exception as exc:  # noqa: BLE001 - a push must never break the run
-        emit(f"notification failed: {exc}")
+def _fetch_error(exc: UcasError) -> tuple[str, str]:
+    """Return ``(notification title, log label)`` for a failed course fetch."""
+    if isinstance(exc, UcasAuthError):
+        return "credentials rejected", "authentication failed"
+    if isinstance(exc, UcasNetworkError):
+        return "network error (will retry)", "network error"
+    if isinstance(exc, UcasServerError):
+        return "UCAS server error (will retry)", "upstream error"
+    if isinstance(exc, UcasJsonError):
+        return "unexpected UCAS response", "bad upstream response"
+    return "failed to fetch courses", "could not fetch courses"
+
+
+def _describe(exc: UcasError) -> str:
+    """Error text with its machine-readable code, so logs stay greppable."""
+    return f"{exc.message} ({exc.code})" if exc.code else exc.message
 
 
 # --------------------------------------------------------------------------- #
@@ -258,12 +296,12 @@ def _clock(value: str) -> str:
     return tail[:5] if tail else "--"
 
 
-def _success_message(date: str, signed: list[SignDetail]) -> Message:
+def _success_message(date: str, signed: list[SignDetail]) -> tuple[str, str]:
     lines = [f"Date: {_pretty_date(date)}", "", *(_format_course_line(item) for item in signed)]
-    return Message(title=f"UCAS auto sign-in succeeded ({len(signed)})", body="\n".join(lines))
+    return f"UCAS auto sign-in succeeded ({len(signed)})", "\n".join(lines)
 
 
-def _failure_message(date: str, failed: list[SignDetail]) -> Message:
+def _failure_message(date: str, failed: list[SignDetail]) -> tuple[str, str]:
     lines = [
         f"Date: {_pretty_date(date)}",
         "",
@@ -271,10 +309,10 @@ def _failure_message(date: str, failed: list[SignDetail]) -> Message:
         "",
         *(_format_course_line(item) for item in failed),
     ]
-    return Message(title=f"UCAS auto sign-in failed ({len(failed)})", body="\n".join(lines))
+    return f"UCAS auto sign-in failed ({len(failed)})", "\n".join(lines)
 
 
 def _pretty_date(compact: str) -> str:
     if len(compact) == 8 and compact.isdigit():
         return f"{compact[:4]}-{compact[4:6]}-{compact[6:]}"
-    return compact or "today"
+    return compact
