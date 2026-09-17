@@ -135,6 +135,7 @@ What each run does:
 | Courses today, but none is in its sign-in window | silent | INFO |
 | A course is in its sign-in window and not yet signed, sign in succeeds | push | WARNING |
 | A course is in its sign-in window and not yet signed, sign in fails | push | CRITICAL |
+| UCAS rejects the sign-in (e.g. `ERRCODE 101` 二维码已失效) | retried once, then push | CRITICAL |
 | Today's date or the course list cannot be fetched | push | CRITICAL |
 | The upstream answers with a shape nobody implemented (server crashes on purpose) | push + exit | CRITICAL |
 | Configuration error (server exits) | log only | CRITICAL |
@@ -235,7 +236,11 @@ class hierarchy encodes what may happen to it:
   rejected credentials (`UcasAuthError`), network trouble (`UcasNetworkError`) and
   upstream trouble (`UcasServerError`, `UcasJsonError`). These never crash the
   server: each pass catches them, logs at `CRITICAL` (which pushes) and carries on;
-  the next class-period run retries.
+  the next class-period run retries. A known case is `ERRCODE 101`
+  "二维码已失效！": direct sign-in shares the QR code's endpoint and embedded
+  timestamp, so UCAS rejects it with QR-flavoured wording whenever the sign-in
+  code is not currently accepted -- a transient condition (production logs show
+  the same request succeeding ~30s later), so it is retried once in-pass.
 * `UcasNotImplementedError` derives from `UcasError` only. It marks an upstream
   response shape nobody has written handling for, and crashing the process is the
   intended behaviour: nobody catches it, the fatal log pushes one last message,
@@ -290,6 +295,14 @@ Details preserved from the original port:
 - The web app's server-side protections (same-origin check, rate limiting) were
   **removed**, because requests originate from the local machine and no public
   service is exposed.
+
+One quirk added on top: **co-taught courses (合班课) are merged into one course**.
+The schedule endpoint returns one row per teacher -- same course number, time
+and classroom, different `courseId`/schedule id (e.g. 高级操作系统教程 taught by
+李鹏/郑晨/武延军 comes back as three rows). It is one physical session and one
+sign-in: signing any row marks them all signed, and further rows only draw
+`ERRCODE 101`. `query_courses` therefore collapses rows sharing course number
+and time, keeping the first row's id for signing and joining the teacher names.
 
 ## Project layout
 

@@ -22,7 +22,7 @@ from __future__ import annotations
 import random
 import time
 import urllib.parse
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -87,6 +87,7 @@ class Course:
     id: str = ""
     uuid: str = ""
     course_name: str = ""
+    course_num: str = ""
     teacher_name: str = ""
     week_day: str = ""
     class_begin_time: str = ""
@@ -107,6 +108,7 @@ class Course:
             id=str(item.get("id") or ""),
             uuid=str(item.get("uuid") or ""),
             course_name=str(item.get("courseName") or ""),
+            course_num=str(item.get("courseNum") or ""),
             teacher_name=str(item.get("teacherName") or ""),
             week_day=str(item.get("weekDay") or ""),
             class_begin_time=str(item.get("classBeginTime") or ""),
@@ -278,6 +280,39 @@ def format_time_range(begin: str, end: str) -> str:
     return f"{extract_clock_time(begin)[:5]} ~ {extract_clock_time(end)[:5]}"
 
 
+def merge_parallel_sessions(courses: list[Course]) -> list[Course]:
+    """Collapse co-taught lecture courses that the upstream splits into rows.
+
+    A jointly taught course (合班课, several teachers sharing one session) comes
+    back as several rows with the same course number, time and classroom but
+    different ``courseId`` / schedule id / teacher. Physically it is one class
+    and one sign-in: production data shows that signing any one row marks them
+    all signed, while further rows only draw ``ERRCODE 101``. So keep the first
+    row's ids for signing and join the teacher names for display.
+    """
+    merged: list[Course] = []
+    position: dict[tuple[str, str, str], int] = {}
+    for course in courses:
+        key = (
+            course.course_num,
+            course.class_begin_time,
+            course.class_end_time,
+        )
+        if key not in position:
+            position[key] = len(merged)
+            merged.append(course)
+            continue
+        target = merged[position[key]]
+        if course.teacher_name and course.teacher_name not in target.teacher_name.split("/"):
+            joined = (
+                f"{target.teacher_name}/{course.teacher_name}"
+                if target.teacher_name
+                else course.teacher_name
+            )
+            merged[position[key]] = replace(target, teacher_name=joined)
+    return merged
+
+
 def format_date_from_ms(timestamp_ms: int) -> str:
     """Format a millisecond timestamp as ``yyyyMMdd`` in UCAS time (UTC+8)."""
     return datetime.fromtimestamp(timestamp_ms / 1000, tz=UCAS_TIMEZONE).strftime("%Y%m%d")
@@ -386,6 +421,10 @@ class UcasClient:
     def query_courses(self, username: str, password: str, date: str) -> list[Course]:
         """Log in and fetch the course list for the given date.
 
+        Co-taught courses (合班课) arrive as one row per teacher and are merged
+        into a single :class:`Course` -- one physical session, one sign-in
+        (see :func:`merge_parallel_sessions`).
+
         Raises:
             UcasAuthError: credentials rejected.
             UcasNetworkError: a request failed.
@@ -432,7 +471,8 @@ class UcasClient:
         if not isinstance(result, list):
             raise UcasNotImplementedError(f"schedule result is not a list: {type(result).__name__}")
 
-        return [Course.from_upstream(item) for item in result if isinstance(item, dict)]
+        courses = [Course.from_upstream(item) for item in result if isinstance(item, dict)]
+        return merge_parallel_sessions(courses)
 
     # -- Sign-in ---------------------------------------------------------- #
 
