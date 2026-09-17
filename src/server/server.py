@@ -6,6 +6,13 @@ academic calendar (hardcoded below as ``CLASS_PERIOD_STARTS``), which is what
 the deployment wants: check in exactly when a class begins and only make noise
 when there is something to say.
 
+Error contract (see :mod:`common.error`): :func:`~server.autosign.run_once`
+handles every operational error itself. Anything that escapes it --
+:class:`UcasNotImplementedError` first of all -- crashes the server **on
+purpose**: :func:`main` logs it at ``CRITICAL`` (so the notifier pushes one
+last message) and re-raises. A failed notification push is not caught either;
+if the notifier dies the server dies with it.
+
 The loop is deliberately simple and stateless: compute the next period start
 from the UCAS clock (``Asia/Shanghai``, hardcoded in :mod:`common.api` and also
 the timezone the UCAS schedule uses), sleep until then, run, repeat. No cron,
@@ -26,6 +33,7 @@ import time
 from datetime import datetime, timedelta
 
 from common.api import UCAS_TIMEZONE, UcasClient
+from common.error import UcasError
 
 from .autosign import AutosignConfig, AutosignConfigError, run_once
 from .logging import attach_notify_handler, configure_logging, get_logger
@@ -60,7 +68,7 @@ def next_run_at(now: datetime) -> datetime:
     """Earliest class-period start strictly after ``now``.
 
     ``now`` must be timezone-aware in UCAS time. After the last period of the
-day the answer is the first period of tomorrow.
+    day the answer is the first period of tomorrow.
     """
     midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
     for day in (midnight, midnight + timedelta(days=1)):
@@ -123,12 +131,12 @@ class Server:
             self.run_pass()
 
     def run_pass(self) -> None:
-        """Run one pass, keeping the server alive across unexpected errors.
+        """Run one pass.
 
-        ``run_once`` already handles every expected upstream failure; this is the
-        last line of defence so a bug or a surprise response cannot kill an
-        unattended process. The record is logged at ``ERROR``, so the traceback
-        goes to stderr and the notify handler pushes the short message.
+        ``run_once`` already handles every operational error, so there is
+        nothing to catch here: whatever escapes it is either
+        :class:`UcasNotImplementedError` or a bug, and both are supposed to
+        crash the process (loudly) instead of being papered over.
         """
         run_once(self.client, self.config)
 
@@ -166,6 +174,15 @@ def main(argv: list[str] | None = None) -> int:
         server.run_forever()
     except KeyboardInterrupt:
         logger.info("server exiting gracefully")
+    except UcasError as exc:
+        # A UcasError this far up is UcasNotImplementedError or an unhandled
+        # subclass: crash on purpose, but push one last notification first.
+        logger.fatal(
+            "unhandled error, crashing on purpose: %s",
+            exc.describe(),
+            extra={"title": "UCAS auto sign-in: crashed"},
+        )
+        raise
     finally:
         server.shutdown()
     logger.info("server stopped")

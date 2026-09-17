@@ -2,14 +2,19 @@
 
 This is the piece that makes the tool usable as a scheduled job: it logs in,
 loads *today's* courses, signs in for every course whose sign-in window is
-currently open, and pushes the outcome to a phone.
+currently open, and reports the outcome.
 
-Design goals, in the order the request stated them:
+Error contract (see :mod:`common.error`):
 
-* **There is a class and it is in the sign-in window** -- sign in; a failure is
-  logged at ``WARNING`` and therefore pushed by the notify handler.
-* **There is no class, or nothing is actionable** -- log at ``INFO``, stay quiet.
-* **Fetching the course list fails** -- log at ``ERROR`` and push the error.
+* :class:`~common.error.UcasOperationalError` -- bad credentials, network and
+  upstream trouble -- never escapes :func:`run_once`. It is logged at
+  ``CRITICAL`` (``logger.fatal``), which the notify handler turns into a push,
+  and the server keeps running.
+* :class:`UcasNotImplementedError` is deliberately **not** caught: it escapes
+  ``run_once``, crashes the process and takes the fatal log (and thus one last
+  notification) with it. An unimplemented path must be loud.
+* Notifier failures are not caught either: if a push cannot be delivered the
+  operator must notice, so the process is allowed to die.
 
 Notifications are not sent from here directly: the module only logs, and
 :mod:`server.logging` turns every ``WARNING`` or worse into a push.
@@ -28,9 +33,7 @@ runs the server.
 
 from __future__ import annotations
 
-import logging
 import os
-import time
 from dataclasses import dataclass, field
 from typing import Mapping
 
@@ -41,13 +44,7 @@ from common.api import (
     format_date_from_ms,
     sign_window_state,
 )
-from common.error import (
-    UcasAuthError,
-    UcasError,
-    UcasJsonError,
-    UcasNetworkError,
-    UcasServerError,
-)
+from common.error import UcasOperationalError
 
 from .logging import get_logger
 
@@ -78,6 +75,11 @@ class AutosignConfig:
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> "AutosignConfig":
+        """Build the configuration from environment variables.
+
+        Raises:
+            AutosignConfigError: a required variable is missing.
+        """
         env = env if env is not None else os.environ
         username = (env.get("UCAS_USERNAME") or "").strip()
         password = (env.get("UCAS_PASSWORD") or "").strip()
@@ -101,6 +103,8 @@ class AutosignConfig:
 
 @dataclass
 class SignDetail:
+    """Outcome of one sign-in attempt: success, or the error that stopped it."""
+
     course: Course
     result: SignResult | None = None
     error: str = ""
@@ -144,27 +148,33 @@ class AutosignResult:
 def run_once(client: UcasClient, config: AutosignConfig) -> AutosignResult:
     """Fetch today's courses and sign in for everything actionable.
 
-    Never raises for expected upstream problems -- those are logged (and, at
-    ``WARNING``/``ERROR``, pushed by the notify handler) and turned into an
-    :class:`AutosignResult`.
+    Never raises :class:`~common.error.UcasOperationalError`: those are caught,
+    logged at ``CRITICAL`` (and therefore pushed) and turned into an
+    :class:`AutosignResult`. :class:`UcasNotImplementedError` and genuine bugs
+    do escape, on purpose -- see the module docstring.
     """
-    # 1. Which day are we signing for? The calibrated UCAS server clock decides.
-    # UcasNetworkError, UcasJsonError, NotImplementedError
-    date = format_date_from_ms(client.server_now_ms())
-
-    # 2. Load the schedule. The endpoint now tells "no courses today" (STATUS 2,
-    #    returned as an empty list) apart from a real error (raised).
-    # UcasNetworkError UcasServerError NotImplementedError
-    courses = client.query_courses(config.username, config.password, date)
+    # 1. Which day are we signing for, and what courses are there? The
+    #    calibrated UCAS server clock decides. All errors here are operational
+    #    and abort the whole run; UcasNotImplementedError escapes and crashes.
+    try:
+        now_ms = client.server_now_ms()
+        date = format_date_from_ms(now_ms)
+        courses = client.query_courses(config.username, config.password, date)
+    except UcasOperationalError as exc:
+        logger.fatal(
+            "could not load the schedule for today: %s",
+            exc.describe(),
+            extra={"title": "UCAS auto sign-in: fetch failed"},
+        )
+        return AutosignResult(date="", status="error", error=exc.message)
 
     if not courses:
         logger.info("%s: no courses -- staying silent", date)
         return AutosignResult(date=date, status="no-courses")
 
-    # 3. Pick the courses that still need a sign-in. UCAS itself is the source
+    # 2. Pick the courses that still need a sign-in. UCAS itself is the source
     #    of truth: a course already signed in (`signStatus == "1"`) is skipped,
     #    and a course is only signed inside its sign-in window.
-    now_ms = client.server_now_ms()
     pending: list[Course] = []
     for course in courses:
         if course.signed:
@@ -179,12 +189,11 @@ def run_once(client: UcasClient, config: AutosignConfig) -> AutosignResult:
         logger.info("%s: %d course(s), nothing to sign in -- staying silent", date, len(courses))
         return AutosignResult(date=date, status="idle")
 
-    # 4. Sign in. Each course is logged at INFO; the run as a whole is rolled up
-    #    into one WARNING (success) / ERROR (failure) below, so the notify
+    # 3. Sign in. Each course is logged at INFO; the run as a whole is rolled up
+    #    into one WARNING (success) / CRITICAL (failure) below, so the notify
     #    handler pushes at most one message per outcome instead of per course.
     result = AutosignResult(date=date, status="signed")
     for course in pending:
-        # UcasUnrecognizableCourse UcasNetworkError UcasJsonError NotImplementedError
         outcome = _sign_one(client, config, course)
         if outcome.ok:
             result.signed.append(outcome)
@@ -205,58 +214,23 @@ def run_once(client: UcasClient, config: AutosignConfig) -> AutosignResult:
     if result.failed:
         result.status = "failed"
         title, body = _failure_message(date, result.failed)
-        logger.error(body, extra={"title": title})
+        logger.fatal(body, extra={"title": title})
 
     return result
 
 
 def _sign_one(client: UcasClient, config: AutosignConfig, course: Course) -> SignDetail:
-    """Sign in for one course, turning every failure into a precise reason."""
-    # UcasUnrecognizableCourse UcasNetworkError UcasJsonError NotImplementedError
-    sign_result = client.sign(config.username, config.password, course.id)
-    return SignDetail(course=course, result=sign_result)
+    """Sign in for one course, turning every operational failure into a reason.
 
-
-def _fail_fetch(date: str, exc: UcasError, level: int = logging.WARNING) -> AutosignResult:
-    """Report a failed course fetch, naming the failure precisely.
-
-    A network or upstream problem is transient and the next class-period run
-    retries it; rejected credentials will keep failing until ``.env`` is fixed,
-    so the notification says so instead of looking like a random glitch. A
-    failure to even determine today's date is logged at ``CRITICAL``.
+    :class:`UcasNotImplementedError` deliberately escapes -- see the module
+    docstring.
     """
-    label = date or format_date_from_ms(int(time.time() * 1000))
-    title, kind = _fetch_error(exc)
-    logger.log(
-        level,
-        "%s: %s\nDate: %s\nError: %s\nCode: %s\nStage: %s",
-        kind,
-        _describe(exc),
-        _pretty_date(label),
-        exc.message,
-        exc.code,
-        exc.stage,
-        extra={"title": f"UCAS auto sign-in: {title}"},
-    )
-    return AutosignResult(date=date, status="error", error=exc.message)
-
-
-def _fetch_error(exc: UcasError) -> tuple[str, str]:
-    """Return ``(notification title, log label)`` for a failed course fetch."""
-    if isinstance(exc, UcasAuthError):
-        return "credentials rejected", "authentication failed"
-    if isinstance(exc, UcasNetworkError):
-        return "network error (will retry)", "network error"
-    if isinstance(exc, UcasServerError):
-        return "UCAS server error (will retry)", "upstream error"
-    if isinstance(exc, UcasJsonError):
-        return "unexpected UCAS response", "bad upstream response"
-    return "failed to fetch courses", "could not fetch courses"
-
-
-def _describe(exc: UcasError) -> str:
-    """Error text with its machine-readable code, so logs stay greppable."""
-    return f"{exc.message} ({exc.code})" if exc.code else exc.message
+    identifier = course.id or course.uuid
+    try:
+        sign_result = client.sign(config.username, config.password, identifier)
+    except UcasOperationalError as exc:
+        return SignDetail(course=course, error=exc.describe())
+    return SignDetail(course=course, result=sign_result)
 
 
 # --------------------------------------------------------------------------- #

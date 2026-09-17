@@ -12,6 +12,11 @@ command loop over today's courses:
 
 The date is never asked for: it is taken from the calibrated UCAS server clock,
 so it is always "today" as the upstream understands it.
+
+Error contract (see :mod:`common.error`): operational errors are caught,
+explained to the user and retried or ignored; :class:`UcasNotImplementedError`
+is never caught -- it crashes with a traceback so the unimplemented path is
+obvious.
 """
 
 from __future__ import annotations
@@ -45,6 +50,7 @@ from common.error import (
     UcasError,
     UcasJsonError,
     UcasNetworkError,
+    UcasOperationalError,
     UcasServerError,
     UcasUnrecognizableCourse,
 )
@@ -53,7 +59,6 @@ WINDOW_TEXT = {
     "open": "Open",
     "before": "Not open",
     "after": "Closed",
-    "unknown": "--",
 }
 
 HELP_LINES = (
@@ -144,7 +149,7 @@ def _error_hint(exc: UcasError) -> str:
         return f"Unexpected reply from UCAS: {exc.message}"
     if isinstance(exc, UcasUnrecognizableCourse):
         return f"Unrecognizable course: {exc.message}"
-    return exc.message
+    return exc.describe()
 
 
 # --------------------------------------------------------------------------- #
@@ -178,18 +183,13 @@ def _login(client: UcasClient) -> Session:
                 print(f"  {_error_hint(exc)}")
                 print()
                 break  # ask for the mail and password again
-            except (UcasNetworkError, UcasServerError, UcasJsonError) as exc:
+            except UcasOperationalError as exc:
                 print("failed.")
                 print(f"  {_error_hint(exc)}")
                 print("  Retrying in a moment; press Ctrl+C to give up.")
                 print()
                 time.sleep(2.0)
                 continue
-            except UcasError as exc:
-                print("failed.")
-                print(f"  {_error_hint(exc)}")
-                print()
-                break
             print("done.")
             return Session(username=username, password=password)
 
@@ -241,7 +241,7 @@ def _load_courses(client: UcasClient, session: Session, date: str) -> list[Cours
     print(f"Fetching courses for {_pretty_date(date)}... ", end="", flush=True)
     try:
         courses = client.query_courses(session.username, session.password, date)
-    except UcasError as exc:
+    except UcasOperationalError as exc:
         print("failed.")
         print(f"  {_error_hint(exc)}")
         return []
@@ -271,7 +271,7 @@ def _sign(client: UcasClient, session: Session, identifier: str, label: str) -> 
     print(f"Signing in for {label}... ", end="", flush=True)
     try:
         result = client.sign(session.username, session.password, identifier)
-    except UcasError as exc:
+    except UcasOperationalError as exc:
         print("failed.")
         print(f"  ✗ {_error_hint(exc)}")
         return False
@@ -494,7 +494,7 @@ def main(argv: list[str] | None = None, *, client: UcasClient | None = None) -> 
     except KeyboardInterrupt:
         print("\nInterrupted.")
         return 130
-    except UcasError as exc:
+    except UcasOperationalError as exc:
         print(f"\nError: {_error_hint(exc)}")
         return 1
     finally:

@@ -17,7 +17,6 @@ the container itself is on.
 from __future__ import annotations
 
 import logging
-import sys
 from datetime import datetime
 
 from common.api import UCAS_TIMEZONE
@@ -51,6 +50,11 @@ class NotifyHandler(logging.Handler):
     traceback, which keeps the push short. A record can set
     ``extra={"title": ...}`` to control the title; otherwise
     ``"{prefix}: {levelname}"`` is used.
+
+    Errors raised by the notifier are deliberately **not** caught: they
+    propagate to the ``logger.*`` call site and crash the process. A sign-in
+    result that cannot be delivered is worthless, and silently swallowing the
+    failure would hide exactly that, so dying loudly is the intended behaviour.
     """
 
     def __init__(

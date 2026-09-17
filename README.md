@@ -150,11 +150,11 @@ What each run does:
 | A course is already signed in (upstream) | silent | INFO |
 | Courses today, but none is in its sign-in window | silent | INFO |
 | A course is in its sign-in window and not yet signed, sign in succeeds | push | WARNING |
-| A course is in its sign-in window and not yet signed, sign in fails | push | ERROR |
-| The course list cannot be fetched | push | WARNING |
-| Today's date cannot be fetched | push | CRITICAL |
-| Configuration error (server exits) | no push | CRITICAL |
-| Notification configuration error (server exits) | no push | CRITICAL |
+| A course is in its sign-in window and not yet signed, sign in fails | push | CRITICAL |
+| Today's date or the course list cannot be fetched | push | CRITICAL |
+| The upstream answers with a shape nobody implemented (server crashes on purpose) | push + exit | CRITICAL |
+| Configuration error (server exits) | log only | CRITICAL |
+| Notification configuration error (server exits) | log only | CRITICAL |
 
 "In its sign-in window" means from 30 minutes before the class starts until the
 class ends -- the same window the upstream enforces. A pass runs at each
@@ -232,8 +232,8 @@ if the messages should stay private.
 
 Notifications are **log-driven**: a `logging` handler pushes every record at
 `WARNING` or above from the server's own loggers. So a successful run (logged at
-`INFO`) stays silent, while a sign-in failure (`WARNING`) or a failed fetch
-(`ERROR`) is pushed once. Add `extra={"title": ...}` to a log call to control
+`INFO`) stays silent, while a sign-in failure or a failed fetch (`CRITICAL`) is
+pushed once. Add `extra={"title": ...}` to a log call to control
 the message title. Library noise (`httpx`, ...) and anything below `WARNING` are
 never pushed.
 
@@ -247,8 +247,28 @@ The webhook already contains the bot token. With the "signature" mode, set
 "custom keyword" mode, make sure the keyword appears in the messages -- the
 notifications' titles already contain `UCAS`. Messages are sent as Feishu `text`.
 If `UCAS_FEISHU_WEBHOOK` is missing, the server exits with a configuration error
-instead of silently dropping notifications; a failed push never breaks the
-sign-in run, it is only written to stderr by `logging`.
+instead of silently dropping notifications; a failed push is likewise never
+swallowed -- if the webhook stops working, the process crashes on purpose
+instead of letting sign-in results vanish silently.
+
+### Error handling
+
+Every deliberate error derives from `UcasError` (`src/common/error.py`), and the
+class hierarchy encodes what may happen to it:
+
+* `UcasOperationalError` -- bad input (`UcasTimeError`, `UcasUnrecognizableCourse`),
+  rejected credentials (`UcasAuthError`), network trouble (`UcasNetworkError`) and
+  upstream trouble (`UcasServerError`, `UcasJsonError`). These never crash the
+  server: each pass catches them, logs at `CRITICAL` (which pushes) and carries on;
+  the next class-period run retries.
+* `UcasNotImplementedError` derives from `UcasError` only. It marks an upstream
+  response shape nobody has written handling for, and crashing the process is the
+  intended behaviour: nobody catches it, the fatal log pushes one last message,
+  and the traceback lands in `docker compose logs` so the missing path gets noticed
+  and implemented.
+
+So `except UcasOperationalError` is always safe, while `except UcasError` would
+swallow the deliberate crashes.
 
 ### Auto-sign environment variables
 

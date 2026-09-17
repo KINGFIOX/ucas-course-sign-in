@@ -1,6 +1,6 @@
 """Client for the UCAS iClass upstream API.
 
-Ports the three Route Handlers of the original Next.js project:
+Ports the three route handlers of the original Next.js project:
 
 * ``/api/course-uuid/query``     -> :meth:`UcasClient.query_courses`
 * ``/api/course-uuid/sign``      -> :meth:`UcasClient.sign`
@@ -10,6 +10,11 @@ The difference is that every request is issued directly from this machine
 instead of going through Vercel, so authentication, same-origin checks and
 rate limiting are unnecessary. Only input validation, timeout handling and
 the original error-code semantics are kept.
+
+Error contract: see :mod:`common.error`. In short, operational failures raise
+:class:`~common.error.UcasOperationalError` subclasses, while response shapes
+nobody has written handling for raise :class:`UcasNotImplementedError`, which
+callers deliberately let crash.
 """
 
 from __future__ import annotations
@@ -145,7 +150,8 @@ def build_login_body(username: str, password: str) -> str:
 def normalize_date(value: str) -> str:
     """Normalize ``yyyy-MM-dd`` / ``yyyyMMdd`` to ``yyyyMMdd``.
 
-    Raises :class:`UcasTimeError` on invalid input.
+    Raises:
+        UcasTimeError: on invalid input (``BAD_DATE``).
     """
     compact = value.replace("-", "").replace("/", "").strip()
     if len(compact) != 8 or not compact.isdigit():
@@ -154,7 +160,12 @@ def normalize_date(value: str) -> str:
 
 
 def validate_credentials(username: str, password: str) -> None:
-    """Validate credentials with the same constraints as the web frontend."""
+    """Validate credentials with the same constraints as the web frontend.
+
+    Raises:
+        UcasAuthError: when the pair is missing or malformed
+            (``BAD_CREDENTIALS``).
+    """
     if not username or not password:
         raise UcasAuthError("Mail and password are required", "BAD_CREDENTIALS")
     if len(username) > MAX_USERNAME_LENGTH or len(password) > MAX_PASSWORD_LENGTH:
@@ -163,19 +174,30 @@ def validate_credentials(username: str, password: str) -> None:
         raise UcasAuthError("Mail must not contain whitespace", "BAD_CREDENTIALS")
 
 
-def normalize_course_sched_id(raw: str) -> str:
-    """A course ID must be exactly 7 digits."""
+def normalize_course_sched_id(raw: str) -> str | None:
+    """Return the course schedule ID, or ``None`` if ``raw`` is not one.
+
+    A course schedule ID is exactly 7 digits.
+    """
     compact = raw.strip()
-    assert len(compact) == 7 and compact.isdigit()
-    return compact
+    if len(compact) == 7 and compact.isdigit():
+        return compact
+    return None
 
 
-def normalize_uuid(raw: str) -> str:
-    """A UUID is a 32-character hex string; hyphens are allowed."""
+def normalize_uuid(raw: str) -> str | None:
+    """Return the timetable UUID, or ``None`` if ``raw`` is not one.
+
+    A UUID is a 32-character hex string; hyphens are allowed and case is
+    normalized to upper case.
+    """
     compact = raw.strip().replace("-", "")
-
-    int(compact, 16) # check if it is a heximal number
-
+    if len(compact) != 32:
+        return None
+    try:
+        int(compact, 16)
+    except ValueError:
+        return None
     return compact.upper()
 
 
@@ -220,14 +242,23 @@ def build_timetable_sign_url(uuid: str, timestamp: int, user_id: str) -> str:
 
 
 def extract_clock_time(value: str) -> str:
-    """Extract ``10:25:00`` from ``2026-03-25 10:25:00``."""
-    tail = value.strip().split()[-1]
-    parts = tail.split(":")
-    hour = int(parts[0])
-    minute = int(parts[1])
-    second = int(parts[2]) if len(parts) > 2 else 0
+    """Extract ``10:25:00`` from ``2026-03-25 10:25:00``.
+
+    Raises:
+        UcasNotImplementedError: the value has a shape we cannot parse (empty,
+            non-numeric or out-of-range) -- deliberately a crash, since it
+            means the upstream changed its time format.
+    """
+    tokens = value.strip().split()
+    fields = (tokens[-1] if tokens else "").split(":")
+    try:
+        hour = int(fields[0])
+        minute = int(fields[1])
+        second = int(fields[2]) if len(fields) > 2 else 0
+    except (IndexError, ValueError):
+        raise UcasNotImplementedError(f"cannot parse clock time from {value!r}") from None
     if not (0 <= hour < 24 and 0 <= minute < 60 and 0 <= second < 60):
-        raise UcasNotImplementedError
+        raise UcasNotImplementedError(f"clock time out of range: {value!r}")
     return f"{hour:02d}:{minute:02d}:{second:02d}"
 
 
@@ -239,18 +270,12 @@ def parse_class_datetime(date: str, value: str) -> datetime:
     """
     clock = extract_clock_time(value)
     compact = normalize_date(date)
-    return datetime.strptime(f"{compact} {clock}", "%Y%m%d %H:%M:%S").replace(
-        tzinfo=UCAS_TIMEZONE
-    )
+    return datetime.strptime(f"{compact} {clock}", "%Y%m%d %H:%M:%S").replace(tzinfo=UCAS_TIMEZONE)
 
 
 def format_time_range(begin: str, end: str) -> str:
     """Human-readable time range, keeping only hours and minutes."""
-    left = extract_clock_time(begin) or "--"
-    right = extract_clock_time(end) or "--"
-    if left == "--" and right == "--":
-        return "--"
-    return f"{left[:5]} ~ {right[:5]}"
+    return f"{extract_clock_time(begin)[:5]} ~ {extract_clock_time(end)[:5]}"
 
 
 def format_date_from_ms(timestamp_ms: int) -> str:
@@ -285,27 +310,14 @@ class UcasClient:
 
     # -- Internal helpers ------------------------------------------------- #
 
-    def _post(self, url: str, **kwargs: Any) -> httpx.Response:
-        """
-        Raises:
-            UcasNetworkError
-        """
-        try:
-            return self._client.post(url, **kwargs)
-        except httpx.TimeoutException as exc:
-            raise UcasNetworkError(
-                "Request timed out; check your network", "NETWORK_TIMEOUT"
-            ) from exc
-        except httpx.HTTPError as exc:
-            raise UcasNetworkError(f"Network error: {exc}", "NETWORK_ERROR") from exc
+    def _request(self, method: str, url: str, **kwargs: Any) -> httpx.Response:
+        """Issue an HTTP request.
 
-    def _get(self, url: str, **kwargs: Any) -> httpx.Response:
-        """
         Raises:
-            UcasNetworkError
+            UcasNetworkError: the request timed out or the connection failed.
         """
         try:
-            return self._client.get(url, **kwargs)
+            return self._client.request(method, url, **kwargs)
         except httpx.TimeoutException as exc:
             raise UcasNetworkError(
                 "Request timed out; check your network", "NETWORK_TIMEOUT"
@@ -315,6 +327,11 @@ class UcasClient:
 
     @staticmethod
     def _json(response: httpx.Response, code: str, stage: str) -> dict[str, Any]:
+        """Decode the response body as a JSON object.
+
+        Raises:
+            UcasJsonError: the body is not JSON or not a JSON object.
+        """
         try:
             data = response.json()
         except ValueError as exc:
@@ -326,9 +343,18 @@ class UcasClient:
     # -- Login ------------------------------------------------------------ #
 
     def login(self, username: str, password: str) -> LoginResult:
-        """Log in and return ``sessionId`` and the user ``id``."""
+        """Log in and return ``sessionId`` and the user ``id``.
+
+        Raises:
+            UcasAuthError: the pair is malformed or rejected (``BAD_CREDENTIALS``
+                / ``AUTH_FAILED``).
+            UcasNetworkError: the request failed.
+            UcasServerError: the login endpoint answered with an HTTP error.
+            UcasJsonError: the answer was not the expected JSON object.
+        """
         validate_credentials(username, password)
-        response = self._post(
+        response = self._request(
+            "POST",
             LOGIN_URL,
             content=build_login_body(username, password),
             headers={
@@ -361,9 +387,13 @@ class UcasClient:
         """Log in and fetch the course list for the given date.
 
         Raises:
-            UcasNetworkError
-            UcasServerError
-            UcasNotImplementedError
+            UcasAuthError: credentials rejected.
+            UcasNetworkError: a request failed.
+            UcasServerError: the schedule endpoint answered with an HTTP error
+                or an error ``STATUS``.
+            UcasJsonError: the answer was not the expected JSON object.
+            UcasNotImplementedError: the answer carries an unknown ``STATUS`` or
+                a ``result`` that is not a list -- crashes on purpose.
         """
         normalized_date = normalize_date(date)
         login = self.login(username, password)
@@ -371,7 +401,8 @@ class UcasClient:
         url = f"{SCHEDULE_URL}?" + urllib.parse.urlencode(
             {"id": login.user_id, "dateStr": normalized_date}
         )
-        response = self._get( # UcasNetworkError
+        response = self._request(
+            "GET",
             url,
             headers={"sessionId": login.session_id, "User-Agent": API_UA},
         )
@@ -396,53 +427,48 @@ class UcasClient:
                 "schedule",
             )
         else:
-            raise UcasNotImplementedError
+            raise UcasNotImplementedError(f"unknown schedule STATUS: {status!r}")
 
         if not isinstance(result, list):
-            raise UcasNotImplementedError
+            raise UcasNotImplementedError(f"schedule result is not a list: {type(result).__name__}")
 
         return [Course.from_upstream(item) for item in result if isinstance(item, dict)]
 
     # -- Sign-in ---------------------------------------------------------- #
 
-    def sign(
-        self,
-        username: str,
-        password: str,
-        identifier: str,
-    ) -> SignResult:
+    def sign(self, username: str, password: str, identifier: str) -> SignResult:
         """Log in and sign in for a course.
 
-        ``identifier`` may be a 7-digit course ID or a 32-character hex UUID.
-        When ``timestamp`` is omitted, a clock-calibrated server timestamp is
-        used. Returns a :class:`SignResult` on success; any failure is raised
-        as a :class:`UcasError` subclass.
+        ``identifier`` is either a 7-digit course schedule ID or a 32-character
+        hex timetable UUID; the sign-in timestamp is the calibrated server
+        clock. Returns a :class:`SignResult` on success.
 
         Raises:
-            UcasUnrecognizableCourse
-            UcasNetworkError
-            UcasJsonError
-            UcasNotImplementedError
+            UcasUnrecognizableCourse: ``identifier`` is neither a course ID nor
+                a UUID (``BAD_IDENTIFIER``).
+            UcasAuthError: credentials rejected.
+            UcasNetworkError: a request failed.
+            UcasServerError: the sign-in endpoint answered with an HTTP error.
+            UcasJsonError: the answer was not the expected JSON object.
+            UcasNotImplementedError: the answer shape has no handling yet --
+                crashes on purpose.
         """
         course_id = normalize_course_sched_id(identifier)
-        timetable_id = normalize_uuid(identifier)
-        if course_id is None and timetable_id is None:
-            raise UcasUnrecognizableCourse(
-                "Invalid course ID or UUID format",
-                "BAD_IDENTIFIER",
-                "request",
-            )
+        uuid = normalize_uuid(identifier)
+        if course_id is None and uuid is None:
+            raise UcasUnrecognizableCourse("Invalid course ID or UUID format", "BAD_IDENTIFIER")
 
-        login = self.login(username, password) # UcasNetworkError
-
+        login = self.login(username, password)
         timestamp = self.sign_timestamp()
 
         if course_id is not None:
             url = build_sign_url(course_id, timestamp, login.user_id)
         else:
-            url = build_timetable_sign_url(timetable_id or "", timestamp, login.user_id)
+            assert uuid is not None  # guarded above: one of the two matched
+            url = build_timetable_sign_url(uuid, timestamp, login.user_id)
 
-        response = self._get( # UcasNetworkError
+        response = self._request(
+            "GET",
             url,
             headers={"sessionId": login.session_id, "User-Agent": API_UA},
         )
@@ -453,8 +479,8 @@ class UcasClient:
                 "sign",
             )
 
-        data = self._json(response, "UPSTREAM_SIGN_BAD_JSON", "sign") # UcasJsonError
-        return parse_sign_response(data) # UcasNotImplementedError
+        data = self._json(response, "UPSTREAM_SIGN_BAD_JSON", "sign")
+        return parse_sign_response(data)
 
     # -- Clock calibration ------------------------------------------------ #
 
@@ -467,25 +493,26 @@ class UcasClient:
         Raises:
             UcasNetworkError: the timestamp endpoint could not be reached.
             UcasJsonError: the reply body was not the expected JSON object.
-            UcasNotImplementedError: the reply was missing a usable ``timestamp`` or
-                carried a non-``0`` ``STATUS`` -- a deliberate placeholder for
-                now, not a finished error path.
+            UcasNotImplementedError: the reply was missing a usable ``timestamp``
+                or carried a non-``0`` ``STATUS`` -- crashes on purpose.
         """
         start_ms = time.time() * 1000
-        response = self._post(  # -> UcasNetworkError
+        response = self._request(
+            "POST",
             f"{TIMESTAMP_URL}?id={random.randint(0, 999_999)}",
             headers={"User-Agent": API_UA, "Connection": "Keep-Alive"},
             timeout=TIMESTAMP_TIMEOUT,
         )
-        data = self._json(response, "UPSTREAM_TIMESTAMP_BAD_JSON", "timestamp")  # -> UcasJsonError
+        data = self._json(response, "UPSTREAM_TIMESTAMP_BAD_JSON", "timestamp")
         timestamp = data.get("timestamp")
         if data.get("STATUS") == "0" and isinstance(timestamp, (int, float)):
             latency_ms = max(0.0, time.time() * 1000 - start_ms)
             # The timestamp is taken mid-round-trip, so add half of it back.
             return int(float(timestamp) + latency_ms / 2)
 
-        # Bad STATUS or no numeric timestamp: not handled yet.
-        raise UcasNotImplementedError
+        raise UcasNotImplementedError(
+            f"timestamp endpoint replied STATUS={data.get('STATUS')!r}, timestamp={timestamp!r}"
+        )
 
     def sign_timestamp(self) -> int:
         """Timestamp accepted by the sign-in endpoint (clock buffer applied)."""
@@ -496,8 +523,8 @@ def parse_sign_response(data: dict[str, Any]) -> SignResult:
     """Parse the upstream sign-in response, supporting both ``STATUS`` and ``ERRCODE`` styles.
 
     Returns a :class:`SignResult` on success. The failure shapes have not been
-    pinned down yet, so for now anything else raises :class:`UcasNotImplementedError`
-    -- a deliberate placeholder, not a finished error path.
+    pinned down yet, so anything else raises :class:`UcasNotImplementedError`
+    -- a deliberate crash, not a finished error path.
     """
     result = data.get("result") or {}
     if not isinstance(result, dict):
@@ -510,7 +537,7 @@ def parse_sign_response(data: dict[str, Any]) -> SignResult:
     if upstream_status == "0" and stu_sign_status == "1":
         return SignResult(True, "Sign-in successful", upstream_status, stu_sign_id, stu_sign_status)
 
-    raise UcasNotImplementedError
+    raise UcasNotImplementedError(f"unhandled sign-in response: {str(data)[:200]}")
 
 
 # --------------------------------------------------------------------------- #
@@ -537,10 +564,8 @@ def compute_sign_window(course: Course, date: str) -> SignWindow:
 
 
 def sign_window_state(course: Course, date: str, now_ms: int) -> str:
-    """Return ``open`` / ``before`` / ``after`` / ``unknown``."""
+    """Return ``open`` / ``before`` / ``after`` for the course's window."""
     window = compute_sign_window(course, date)
-    if window is None:
-        return "unknown"
     if now_ms < window.open_at:
         return "before"
     if now_ms > window.close_at:

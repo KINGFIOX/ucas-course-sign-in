@@ -30,8 +30,12 @@ FEISHU_MAX_BYTES = 30000
 
 
 class NotifyError(Exception):
-    """Raised when the message cannot be delivered."""
+    """Raised when the message cannot be delivered.
 
+    Notification delivery is best-effort but loud: nobody catches this error,
+    so a webhook that stops working takes the process down instead of letting
+    sign-in results vanish silently.
+    """
 
 
 # --------------------------------------------------------------------------- #
@@ -129,11 +133,20 @@ class FeishuNotifier(Notifier):
         return payload
 
     def send(self, message: Message) -> None:
-        response = self.client.post(
-            self.webhook,
-            json=self.build_payload(message),
-            timeout=self._timeout,
-          )
+        """Post the message; see the class docstring for the error contract.
+
+        Raises:
+            NotifyError: the webhook answered with an error, or the HTTP
+                request itself failed. Callers deliberately let this crash.
+        """
+        try:
+            response = self.client.post(
+                self.webhook,
+                json=self.build_payload(message),
+                timeout=self._timeout,
+            )
+        except httpx.HTTPError as exc:
+            raise NotifyError(f"feishu: request failed: {exc}") from exc
         if response.status_code >= 400:
             raise NotifyError(f"feishu: upstream returned HTTP {response.status_code}")
 
