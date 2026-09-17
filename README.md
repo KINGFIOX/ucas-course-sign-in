@@ -180,8 +180,6 @@ the webhook. Keep the group to yourself only if you don't want anyone else to
 receive the notifications.
 
 1. Choose a security mode:
-   - **Custom keyword**: the bot only accepts messages containing the keyword;
-     the runner's titles already contain `UCAS`, so `UCAS` works.
    - **Signature verification**: copy the secret and set `UCAS_FEISHU_SECRET`.
 2. Copy the webhook (`https://open.feishu.cn/open-apis/bot/v2/hook/xxxxxxxx`).
 3. Put it in `.env`:
