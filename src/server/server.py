@@ -1,14 +1,15 @@
-"""Hourly sign-in server.
+"""Sign-in server aligned to the UCAS class calendar.
 
 The one-pass routine in :mod:`server.autosign` performs a single run; the
-:class:`Server` keeps calling it **at the top of every hour**, which is what the
-deployment wants: run once per hour and only make noise when there is something
-to say.
+:class:`Server` keeps calling it **at every class-period start** of the UCAS
+academic calendar (hardcoded below as ``CLASS_PERIOD_STARTS``), which is what
+the deployment wants: check in exactly when a class begins and only make noise
+when there is something to say.
 
-The loop is deliberately simple and stateless: compute the next hour boundary
+The loop is deliberately simple and stateless: compute the next period start
 from the UCAS clock (``Asia/Shanghai``, hardcoded in :mod:`common.api` and also
-the timezone the UCAS schedule uses), sleep until then, run, repeat. No cron, no
-APScheduler dependency.
+the timezone the UCAS schedule uses), sleep until then, run, repeat. No cron,
+no APScheduler dependency.
 
 Lifecycle follows the usual server shape (as in ``sgl-project/mini-sglang``):
 :meth:`Server.run_forever` blocks until shutdown, and shutdown is simply a
@@ -33,14 +34,50 @@ from .notify import Notifier, NotifyConfigError, build_notifier
 logger = get_logger(__name__)
 
 
-def seconds_until_next_run(now: datetime) -> float:
-    """Seconds from ``now`` until the next hour boundary.
+#: Class-period start times of the UCAS academic calendar, in Beijing time
+#: (``UCAS_TIMEZONE``). A sign-in pass runs at each of these moments: the
+#: sign-in window opens 30 minutes before class begins
+#: (``SIGN_WINDOW_BEFORE_MS`` in :mod:`common.api`), so the pass at the exact
+#: period start always lands inside the window of a class beginning then.
+CLASS_PERIOD_STARTS: tuple[tuple[int, int], ...] = (
+    (8, 25),
+    (9, 15),
+    (10, 20),
+    (11, 10),
+    (13, 25),
+    (14, 15),
+    (15, 20),
+    (16, 10),
+    (17, 0),
+    (18, 25),
+    (19, 15),
+    (20, 10),
+    (21, 0),
+)
 
-    For example at 13:59:40 it returns 20 seconds; at 14:00:00 it returns 3600.
-    The result is always strictly positive.
+
+def next_run_at(now: datetime) -> datetime:
+    """Earliest class-period start strictly after ``now``.
+
+    ``now`` must be timezone-aware in UCAS time. After the last period of the
+day the answer is the first period of tomorrow.
     """
-    boundary = now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
-    return max(1.0, (boundary - now).total_seconds())
+    midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    for day in (midnight, midnight + timedelta(days=1)):
+        for hour, minute in CLASS_PERIOD_STARTS:
+            candidate = day.replace(hour=hour, minute=minute)
+            if candidate > now:
+                return candidate
+    raise AssertionError("unreachable: tomorrow's first period always follows now")
+
+
+def seconds_until_next_run(now: datetime) -> float:
+    """Seconds from ``now`` until the next class-period start.
+
+    For example at 08:24:40 it returns 20 seconds; at 08:25:00 it skips to
+    09:15:00 and returns 3300. The result is always strictly positive.
+    """
+    return max(1.0, (next_run_at(now) - now).total_seconds())
 
 
 def install_signal_handlers() -> None:
@@ -62,7 +99,7 @@ def install_signal_handlers() -> None:
 
 
 class Server:
-    """Run one sign-in pass per hour until shut down."""
+    """Run one sign-in pass per class period until shut down."""
 
     def __init__(self, config: AutosignConfig, client: UcasClient, notifier: Notifier) -> None:
         self.config = config
@@ -70,12 +107,12 @@ class Server:
         self.notifier = notifier
 
     def run_forever(self) -> None:
-        """Run the hourly loop. Only returns on shutdown (``KeyboardInterrupt``)."""
+        """Run the class-period loop. Only returns on shutdown (``KeyboardInterrupt``)."""
         if self.config.run_on_start:
             logger.warning("run-on-start enabled: doing an initial pass")
             self.run_pass()
         else:
-            logger.warning("run-on-start disabled: waiting for the next hour boundary")
+            logger.warning("run-on-start disabled: waiting for the next class period")
 
         while True:
             now = datetime.now(UCAS_TIMEZONE)
@@ -143,7 +180,9 @@ def main(argv: list[str] | None = None) -> int:
 _USAGE = """\
 usage: server
 
-Run the automatic sign-in every hour (at the top of the hour) until stopped.
+Run the automatic sign-in at every UCAS class-period start
+(08:25 09:15 10:20 11:10 13:25 14:15 15:20 16:10 17:00 18:25 19:15 20:10 21:00,
+Beijing time, hardcoded from the academic calendar) until stopped.
 The first pass runs immediately unless UCAS_RUN_ON_START=0.
 
 environment:

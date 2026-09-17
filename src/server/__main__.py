@@ -1,4 +1,4 @@
-"""``python -m server`` entry point: run the hourly scheduler."""
+"""``python -m server`` entry point: run the class-calendar scheduler."""
 
 from __future__ import annotations
 

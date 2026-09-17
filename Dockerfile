@@ -83,7 +83,8 @@ ENV TZ=Asia/Shanghai \
 
 USER ucas
 
-# Default: the hourly scheduler (equivalent to the `server` console script).
+# Default: the class-calendar scheduler (equivalent to the `server` console
+# script).
 # The image is multi-purpose, so other modules can be selected by overriding
 # the entrypoint, e.g. the interactive TUI:
 #   docker compose run --rm -it --entrypoint python ucas-course-sign-in -m tui

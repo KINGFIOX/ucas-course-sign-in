@@ -30,8 +30,9 @@ render a QR code that you scan with the UCAS mobile app.
 - **Server clock calibration**: syncs with the UCAS timestamp server and
   compensates for the ~3s drift between its two servers.
 - Refreshes the course status automatically after a successful sign-in.
-- **Automatic sign-in**: an hourly scheduler (`server`) that signs in for you
-  and pushes the result to your phone. It is meant to run in the shipped
+- **Automatic sign-in**: a class-calendar scheduler (`server`) that signs in for
+  you at every class-period start and pushes the result to your phone. It is
+  meant to run in the shipped
   `Dockerfile` / `docker-compose.yml` stack (see
   [Automatic sign-in](#automatic-sign-in-docker)).
 
@@ -57,7 +58,7 @@ separate install step:
 ```bash
 uv sync                  # create .venv and install the project (editable)
 uv run tui               # interactive course list / sign-in
-uv run server            # hourly auto sign-in scheduler
+uv run server            # auto sign-in scheduler (runs at every class-period start)
 ```
 
 Pass a specific interpreter on the first sync if you like:
@@ -134,10 +135,12 @@ and confirm there.
 
 ## Automatic sign-in (Docker)
 
-Besides the interactive TUI, the project ships a non-interactive hourly
-scheduler (`server`) that is meant to run in the deployed Docker stack. It signs
-in for you **at the top of every hour** and only notifies you when there is
-something to say.
+Besides the interactive TUI, the project ships a non-interactive scheduler
+(`server`) that is meant to run in the deployed Docker stack. It signs in for
+you **at every class-period start of the UCAS academic calendar** (08:25,
+09:15, 10:20, 11:10, 13:25, 14:15, 15:20, 16:10, 17:00, 18:25, 19:15, 20:10,
+21:00 Beijing time, hardcoded in `src/server/server.py`) and only notifies you
+when there is something to say.
 
 What each run does:
 
@@ -154,14 +157,14 @@ What each run does:
 | Notification configuration error (server exits) | no push | CRITICAL |
 
 "In its sign-in window" means from 30 minutes before the class starts until the
-class ends -- the same window the upstream enforces. Because the window lasts
-through the whole class, the hourly cadence always gets at least one chance to
-sign in.
+class ends -- the same window the upstream enforces. A pass runs at each
+class-period start, which always lands inside the window of a class beginning
+then; when a class spans several periods, later passes are retries.
 
 Each run is idempotent per day: every pass re-fetches today's course list and
 trusts the sign-in flag **UCAS itself returns**, so a course that is already
 signed in is never signed or pushed twice. Nothing is persisted locally -- no
-state file, no volume. Failures are retried on the next hourly run.
+state file, no volume. Failures are retried on the next class-period run.
 
 > [!IMPORTANT]
 > The course date and the sign-in window are always evaluated in
@@ -188,7 +191,7 @@ UCAS_FEISHU_WEBHOOK=https://open.feishu.cn/open-apis/bot/v2/hook/xxxxxxxx
 UCAS_FEISHU_SECRET=xxxxxxxxxxxxxxxx   # only for "signature verification"
 ```
 
-Then `docker compose up -d --build` and watch the hourly runs with
+Then `docker compose up -d --build` and watch the runs with
 `docker compose logs -f`.
 
 ### Deploy with docker compose
@@ -198,7 +201,7 @@ cp .env.example .env
 $EDITOR .env                 # credentials + Feishu webhook
 
 docker compose up -d --build
-docker compose logs -f        # watch the hourly runs
+docker compose logs -f        # watch the runs
 ```
 
 Useful commands:
@@ -213,9 +216,9 @@ docker compose down
 docker compose run --rm ucas-course-sign-in -h
 ```
 
-There is no separate one-shot command: the container always runs the hourly
-scheduler, and with `UCAS_RUN_ON_START=1` (the default) it also performs one
-pass immediately on start.
+There is no separate one-shot command: the container always runs the
+class-calendar scheduler, and with `UCAS_RUN_ON_START=1` (the default) it also
+performs one pass immediately on start.
 
 The server logs through the Python standard `logging` module to stderr, one line
 per event, timestamped in `Asia/Shanghai`: `docker compose logs -f` is all you
@@ -264,7 +267,8 @@ no courses that day (quiet).
 
 ### How the schedule works
 
-The server wakes on every hour boundary (`xx:00:00`) and runs a sign-in pass.
+The server wakes at every class-period start (`08:25`, `09:15`, ... Beijing
+time, hardcoded from the academic calendar) and runs a sign-in pass.
 No cron or extra scheduler dependency is involved. Shutdown is a regular
 server-style `KeyboardInterrupt`: `SIGTERM`/`SIGINT` (as sent by `docker stop`)
 are routed to it, so both interrupt the sleep and exit gracefully.
@@ -297,7 +301,7 @@ Details preserved from the original port:
 ```text
 .
 ├─ pyproject.toml
-├─ Dockerfile                 # deployable image (hourly server by default)
+├─ Dockerfile                 # deployable image (class-calendar server by default)
 ├─ docker-compose.yml         # server deployment
 ├─ .env.example               # copy to .env and fill in
 ├─ src/
@@ -311,7 +315,7 @@ Details preserved from the original port:
 │  └─ server/                 # automatic front end
 │     ├─ __main__.py          #   python -m server
 │     ├─ autosign.py          #   one-pass sign-in + notification
-│     ├─ server.py            #   hourly scheduler
+│     ├─ server.py            #   class-calendar scheduler
 │     ├─ logging.py           #   stdlib logging + notify handler (stderr/Push)
 │     └─ notify.py            #   Feishu notifications
 ```

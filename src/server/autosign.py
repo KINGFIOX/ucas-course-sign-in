@@ -16,12 +16,14 @@ Notifications are not sent from here directly: the module only logs, and
 
 The run is *idempotent per day*: the course list is re-fetched from UCAS on
 every run and a course that is already marked as signed upstream is never
-signed again or pushed twice. Failures are retried on the next run, and inside
-the sign-in window there are usually one or two hourly runs left to recover.
+signed again or pushed twice. Failures are retried on the next run, and a
+later class period usually still falls inside the window, leaving a chance
+to recover.
 
 This module is an internal building block: the ``server`` console script calls
-:func:`run_once` every hour (see :mod:`server.server`). A standalone one-shot
-command is intentionally not exposed; the Docker image runs the server.
+:func:`run_once` at every class-period start (see :mod:`server.server`). A
+standalone one-shot command is intentionally not exposed; the Docker image
+runs the server.
 """
 
 from __future__ import annotations
@@ -182,6 +184,7 @@ def run_once(client: UcasClient, config: AutosignConfig) -> AutosignResult:
     #    handler pushes at most one message per outcome instead of per course.
     result = AutosignResult(date=date, status="signed")
     for course in pending:
+        # UcasUnrecognizableCourse UcasNetworkError UcasJsonError NotImplementedError
         outcome = _sign_one(client, config, course)
         if outcome.ok:
             result.signed.append(outcome)
@@ -217,10 +220,10 @@ def _sign_one(client: UcasClient, config: AutosignConfig, course: Course) -> Sig
 def _fail_fetch(date: str, exc: UcasError, level: int = logging.WARNING) -> AutosignResult:
     """Report a failed course fetch, naming the failure precisely.
 
-    A network or upstream problem is transient and the next hourly run retries
-    it; rejected credentials will keep failing until ``.env`` is fixed, so the
-    notification says so instead of looking like a random glitch. A failure to
-    even determine today's date is logged at ``CRITICAL``.
+    A network or upstream problem is transient and the next class-period run
+    retries it; rejected credentials will keep failing until ``.env`` is fixed,
+    so the notification says so instead of looking like a random glitch. A
+    failure to even determine today's date is logged at ``CRITICAL``.
     """
     label = date or format_date_from_ms(int(time.time() * 1000))
     title, kind = _fetch_error(exc)
