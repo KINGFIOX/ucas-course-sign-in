@@ -9,9 +9,6 @@ number; the tool can either call the upstream sign-in endpoint for you or
 render a QR code that you scan with the UCAS mobile app.
 
 > This is a Python rewrite of [lccipher/UCAS-Course-Sign-in](https://github.com/lccipher/UCAS-Course-Sign-in).
-> The original is a Next.js web app that has to be deployed to Vercel, and
-> `vercel.app` is not always reachable from mainland China. This version runs
-> locally — **no deployment, no browser**.
 
 >[!CAUTION]
 > **This project is for learning and personal use only. Do not use it for any commercial or illegal purpose.**
@@ -37,7 +34,8 @@ render a QR code that you scan with the UCAS mobile app.
   [Automatic sign-in](#automatic-sign-in-docker)).
 
 All UCAS requests go straight to `iclass.ucas.edu.cn:8181`, and credentials are
-only held in memory for the current session — never written to disk. When
+only held in memory for the current session — never written to disk(which is 
+safe for your privacy). When
 notifications are enabled, only the sign-in *result* (course names and status,
 no credentials) is sent to your Feishu group, which may be a third-party
 server.
@@ -63,20 +61,6 @@ uv run server            # auto sign-in scheduler (runs at every class-period st
 
 Pass a specific interpreter on the first sync if you like:
 `uv sync --python=3.12`.
-
-### Install as a command
-
-To get `tui` / `server` on your `PATH` without keeping a checkout around, use
-`uv tool` (or `pipx`), which installs the app into its own managed
-environment:
-
-```bash
-uv tool install .
-tui
-# or
-pipx install .
-tui
-```
 
 ## Usage
 
@@ -163,14 +147,9 @@ then; when a class spans several periods, later passes are retries.
 
 Each run is idempotent per day: every pass re-fetches today's course list and
 trusts the sign-in flag **UCAS itself returns**, so a course that is already
-signed in is never signed or pushed twice. Nothing is persisted locally -- no
-state file, no volume. Failures are retried on the next class-period run.
-
-> [!IMPORTANT]
-> The course date and the sign-in window are always evaluated in
-> `Asia/Shanghai` (China Standard Time, UTC+8). The timezone is **hardcoded**
-> in the image and in the code -- there is no `TZ` variable to set, and the
-> container's own timezone cannot shift the window.
+signed in is never signed or pushed twice.
+Failures would not stop the server, but will notify you via Feishu,
+which would be retried on the next class-period run.
 
 ### Quick start with Feishu
 
@@ -209,9 +188,7 @@ docker compose ps
 docker compose restart
 docker compose down
 
-# show the scheduler's help / environment reference without starting it
-# (the image entrypoint is `python -m server`)
-docker compose run --rm ucas-course-sign-in -h
+docker compose logs
 ```
 
 There is no separate one-shot command: the container always runs the
@@ -355,19 +332,6 @@ ruff check .
 `UcasClient` accepts an injected `httpx.Client`, which makes it easy to point
 at a different upstream or to inject a `MockTransport` in tests. `tui.tui.main()`
 accepts an injected `client=...` for the same reason.
-
-## Differences from the web version
-
-| | Web version | This tool |
-| --- | --- | --- |
-| Deployment | Requires Vercel / a server | Runs locally, no deployment |
-| Reachability | Depends on `vercel.app` | Only depends on the UCAS upstream |
-| Browser | Required | Not required |
-| Interface | Web page / QR code | Terminal prompts |
-| Sign-in method | Generate a QR → scan with phone, or direct sign-in | Direct sign-in, or a terminal QR code to scan |
-| QR codes | Generate / refresh / download as PNG | Rendered in the terminal and refreshed on demand |
-| Server-side protections | Same-origin check / rate limiting | Not needed (direct local requests) |
-| Credentials | Sent to the deployed server | Kept in local memory only |
 
 ## Disclaimer
 

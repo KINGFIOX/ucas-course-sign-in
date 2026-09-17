@@ -76,8 +76,7 @@ COPY --from=builder --chown=ucas:ucas /app /app
 WORKDIR /app
 
 # Baked-in timezone: do not make it overridable, the UCAS clock is fixed.
-ENV TZ=Asia/Shanghai \
-    PATH="/app/.venv/bin:${PATH}" \
+ENV PATH="/app/.venv/bin:${PATH}" \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1
 
