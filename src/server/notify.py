@@ -33,9 +33,6 @@ class NotifyError(Exception):
     """Raised when the message cannot be delivered."""
 
 
-class NotifyConfigError(Exception):
-    """Raised when the notifier is not configured correctly."""
-
 
 # --------------------------------------------------------------------------- #
 # Message
@@ -132,20 +129,15 @@ class FeishuNotifier(Notifier):
         return payload
 
     def send(self, message: Message) -> None:
-        try:
-            response = self.client.post(
-                self.webhook,
-                json=self.build_payload(message),
-                timeout=self._timeout,
-            )
-        except httpx.HTTPError as exc:
-            raise NotifyError(f"feishu: {exc}") from exc
+        response = self.client.post(
+            self.webhook,
+            json=self.build_payload(message),
+            timeout=self._timeout,
+          )
         if response.status_code >= 400:
             raise NotifyError(f"feishu: upstream returned HTTP {response.status_code}")
-        try:
-            data = response.json()
-        except ValueError as exc:
-            raise NotifyError("feishu: upstream returned non-JSON data") from exc
+
+        data = response.json()
         code = data.get("code")
         if code is None:
             code = data.get("StatusCode")
@@ -177,7 +169,7 @@ def build_notifier(
     env = env if env is not None else os.environ
     webhook = (env.get("UCAS_FEISHU_WEBHOOK") or "").strip()
     if not webhook:
-        raise NotifyConfigError("feishu: UCAS_FEISHU_WEBHOOK is required")
+        raise ValueError("feishu: UCAS_FEISHU_WEBHOOK is required")
     return FeishuNotifier(
         webhook=webhook,
         secret=(env.get("UCAS_FEISHU_SECRET") or "").strip(),

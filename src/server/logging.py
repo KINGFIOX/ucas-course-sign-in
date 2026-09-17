@@ -64,23 +64,8 @@ class NotifyHandler(logging.Handler):
         self.prefix = prefix
 
     def emit(self, record: logging.LogRecord) -> None:
-        try:
-            title = getattr(record, "title", "") or f"{self.prefix}: {record.levelname.lower()}"
-            self.notifier.send(Message(title=title, body=record.getMessage()))
-        except Exception:  # noqa: BLE001 - a failed push must never break logging
-            self.handleError(record)
-
-    def handleError(self, record: logging.LogRecord) -> None:
-        """Report a failed push briefly on stderr, instead of the default dump.
-
-        Losing a notification is worth one line, not a full traceback, and it
-        must never disturb the run that produced the record.
-        """
-        exc = sys.exc_info()[1]
-        print(
-            f"notify: could not push {record.levelname} from {record.name}: {exc or 'unknown error'}",
-            file=sys.stderr,
-        )
+        title = getattr(record, "title", "") or f"{self.prefix}: {record.levelname.lower()}"
+        self.notifier.send(Message(title=title, body=record.getMessage()))
 
 
 def configure_logging(level: int | str = logging.INFO) -> None:

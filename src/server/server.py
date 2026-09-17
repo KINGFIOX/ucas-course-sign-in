@@ -29,7 +29,7 @@ from common.api import UCAS_TIMEZONE, UcasClient
 
 from .autosign import AutosignConfig, AutosignConfigError, run_once
 from .logging import attach_notify_handler, configure_logging, get_logger
-from .notify import Notifier, NotifyConfigError, build_notifier
+from .notify import Notifier, build_notifier
 
 logger = get_logger(__name__)
 
@@ -154,12 +154,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     client = UcasClient()
-    try:
-        notifier = build_notifier()
-    except NotifyConfigError as exc:
-        logger.fatal("notification configuration error: %s", exc)
-        client.close()
-        return 2
+    notifier = build_notifier()
 
     # Every WARNING or worse is pushed from now on.
     attach_notify_handler(notifier)
