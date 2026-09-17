@@ -88,7 +88,7 @@ def install_signal_handlers() -> None:
     """
 
     def _raise_keyboard_interrupt(signum: int, frame: object) -> None:
-        logger.info("received signal %s, shutting down gracefully", signum)
+        logger.warning("received signal %s, shutting down gracefully", signum)
         raise KeyboardInterrupt
 
     for sig in (signal.SIGTERM, signal.SIGINT):

@@ -28,6 +28,7 @@ from .error import (
     UcasAuthError,
     UcasJsonError,
     UcasNetworkError,
+    UcasNotImplementedError,
     UcasServerError,
     UcasTimeError,
     UcasUnrecognizableCourse,
@@ -226,7 +227,7 @@ def extract_clock_time(value: str) -> str:
     minute = int(parts[1])
     second = int(parts[2]) if len(parts) > 2 else 0
     if not (0 <= hour < 24 and 0 <= minute < 60 and 0 <= second < 60):
-        raise NotImplementedError
+        raise UcasNotImplementedError
     return f"{hour:02d}:{minute:02d}:{second:02d}"
 
 
@@ -362,7 +363,7 @@ class UcasClient:
         Raises:
             UcasNetworkError
             UcasServerError
-            NotImplementedError
+            UcasNotImplementedError
         """
         normalized_date = normalize_date(date)
         login = self.login(username, password)
@@ -395,10 +396,10 @@ class UcasClient:
                 "schedule",
             )
         else:
-            raise NotImplementedError
+            raise UcasNotImplementedError
 
         if not isinstance(result, list):
-            raise NotImplementedError
+            raise UcasNotImplementedError
 
         return [Course.from_upstream(item) for item in result if isinstance(item, dict)]
 
@@ -421,7 +422,7 @@ class UcasClient:
             UcasUnrecognizableCourse
             UcasNetworkError
             UcasJsonError
-            NotImplementedError
+            UcasNotImplementedError
         """
         course_id = normalize_course_sched_id(identifier)
         timetable_id = normalize_uuid(identifier)
@@ -453,7 +454,7 @@ class UcasClient:
             )
 
         data = self._json(response, "UPSTREAM_SIGN_BAD_JSON", "sign") # UcasJsonError
-        return parse_sign_response(data) # NotImplementedError
+        return parse_sign_response(data) # UcasNotImplementedError
 
     # -- Clock calibration ------------------------------------------------ #
 
@@ -466,7 +467,7 @@ class UcasClient:
         Raises:
             UcasNetworkError: the timestamp endpoint could not be reached.
             UcasJsonError: the reply body was not the expected JSON object.
-            NotImplementedError: the reply was missing a usable ``timestamp`` or
+            UcasNotImplementedError: the reply was missing a usable ``timestamp`` or
                 carried a non-``0`` ``STATUS`` -- a deliberate placeholder for
                 now, not a finished error path.
         """
@@ -484,7 +485,7 @@ class UcasClient:
             return int(float(timestamp) + latency_ms / 2)
 
         # Bad STATUS or no numeric timestamp: not handled yet.
-        raise NotImplementedError
+        raise UcasNotImplementedError
 
     def sign_timestamp(self) -> int:
         """Timestamp accepted by the sign-in endpoint (clock buffer applied)."""
@@ -495,7 +496,7 @@ def parse_sign_response(data: dict[str, Any]) -> SignResult:
     """Parse the upstream sign-in response, supporting both ``STATUS`` and ``ERRCODE`` styles.
 
     Returns a :class:`SignResult` on success. The failure shapes have not been
-    pinned down yet, so for now anything else raises :class:`NotImplementedError`
+    pinned down yet, so for now anything else raises :class:`UcasNotImplementedError`
     -- a deliberate placeholder, not a finished error path.
     """
     result = data.get("result") or {}
@@ -509,7 +510,7 @@ def parse_sign_response(data: dict[str, Any]) -> SignResult:
     if upstream_status == "0" and stu_sign_status == "1":
         return SignResult(True, "Sign-in successful", upstream_status, stu_sign_id, stu_sign_status)
 
-    raise NotImplementedError
+    raise UcasNotImplementedError
 
 
 # --------------------------------------------------------------------------- #

@@ -26,6 +26,10 @@ class UcasTimeError(UcasError):
     """The date/time value handed in is unusable (``BAD_DATE``)."""
 
 
+class UcasNotImplementedError(UcasError):
+    """not implemented error"""
+
+
 class UcasNetworkError(UcasError):
     """The HTTP request itself failed: timeout or connection error."""
 
