@@ -219,9 +219,8 @@ never pushed.
 | `UCAS_FEISHU_SECRET` | -- | Secret for the "signature" (签名校验) security mode |
 
 The webhook already contains the bot token. With the "signature" mode, set
-`UCAS_FEISHU_SECRET`; `timestamp` and `sign` are added to the JSON body. With the
-"custom keyword" mode, make sure the keyword appears in the messages -- the
-notifications' titles already contain `UCAS`. Messages are sent as Feishu `text`.
+`UCAS_FEISHU_SECRET`; `timestamp` and `sign` are added to the JSON body.
+Messages are sent as Feishu `text`.
 If `UCAS_FEISHU_WEBHOOK` is missing, the server exits with a configuration error
 instead of silently dropping notifications; a failed push is likewise never
 swallowed -- if the webhook stops working, the process crashes on purpose
